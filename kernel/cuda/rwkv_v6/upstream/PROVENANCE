@@ -1,0 +1,43 @@
+VENDORED THIRD-PARTY SOURCE -- COPIED, NOT WRITTEN HERE.
+
+Project     RWKV-LM  --  https://github.com/BlinkDL/RWKV-LM
+Author      BlinkDL (Bo PENG) and the RWKV contributors
+Licence     Apache License 2.0.  The project's LICENSE file sits beside this one,
+            byte-for-byte as it ships upstream.  Apache-2.0 permits redistribution
+            of the source provided the licence travels with it, which is what this
+            directory is for.
+Obtained    from the archive RWKV-LM-main.zip supplied by the user on 2026-08-16.
+            sha256(RWKV-LM-main.zip) =
+              c69f57e2e5b1fc1e29392f212c984a9bf9dac530008fe2916e9539a8ecb104ae
+Version     A GitHub "-main.zip" snapshot carries NO commit hash and the project
+            declares no version string, so there is nothing honest to record beyond
+            the archive checksum above and the per-file checksums below.  The
+            snapshot is recent enough to contain RWKV-v8/260222_rosa4bitLM_L12.py,
+            so it post-dates 2026-02-22.
+
+FILES, and where each came from inside the archive:
+
+  wkv6_cuda.cu   RWKV-LM-main/RWKV-v5/cuda/wkv6_cuda.cu
+                 sha256 28b1ac92bbcf4586c5eed69a7285de64b8994161000ab4f0cf65c6810086f75e
+  wkv6_op.cpp    RWKV-LM-main/RWKV-v5/cuda/wkv6_op.cpp
+                 sha256 792cd5332f767f0a1f34d45a7f7af8341cecd70363570de1763fa3d0a4b6cfb0
+  LICENSE        RWKV-LM-main/LICENSE
+                 sha256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+
+NOT ONE BYTE OF THOSE FILES WAS CHANGED.  No header was stripped, no line was
+reformatted, nothing was renamed.  Verify with sha256sum against the table above.
+
+WHY RWKV-v5/ HOLDS THE RWKV-6 KERNEL.  The archive's RWKV-v6/ directory contains a
+README and nothing else; its one line reads
+
+    "Please use /RWKV-v5/ and add --my_testing \"x060\" as an extra train.py
+     parameter, to enable RWKV v6.0"
+
+so RWKV-v5/cuda/wkv6_*.{cu,cpp} and RWKV-v5/src/model.py's RWKV_Tmix_x060 ARE
+upstream RWKV-6.  This is upstream's own layout, not a guess.
+
+HOW IT IS BUILT HERE.  Upstream compiles this pair at import time with
+torch.utils.cpp_extension.load and -D_N_=<head size> -D_T_=<context length>.  That
+is what kernel/cuda/rwkv_v6/upstream.py does, with the same flags upstream passes,
+against these files.  See that file's header for why the repository's usual
+nvcc -cubin path cannot be used for someone else's kernel.

@@ -1,0 +1,45 @@
+# mira_llm -- runtime dependencies (unpinned)
+#
+#   pip install -r requirements.txt
+#
+# The model, tokenizer and training loops need only torch; tqdm drives every progress bar
+# and matplotlib/numpy draw the per-stage PDF figures. transformers is used by stage 8
+# (the gpt2-small student) and by the optional hh/shp dataset loaders, which also need
+# datasets.
+torch
+tqdm
+einops
+tilelang==0.1.8
+apache-tvm-ffi==0.1.9
+cuda-python>=12.8,<13
+matplotlib
+numpy
+transformers       # the gpt2-small student of stage 10
+Pillow>=9.1        # transformers reaches PIL.Image.Resampling, which 9.1 added
+pyarrow            # a pretraining corpus may ship as parquet
+huggingface_hub    # used ONLY by tools/download_data.py; no trainer imports it
+
+# NOTHING THIRD-PARTY IN OUR HOT PATH. We build our own CUDA kernels instead:
+#
+#     ./old_scripts/stage5_compile_cuda_kernel.sh          # or: make -C kernel/cuda universal check
+#
+# which produces build/kernel/cuda/{mira_scan,mira_decay,mira_causal_cov1d}.cubin, found through
+# MIRA_CUDA_KERNEL in config.sh. That needs nvcc at BUILD time only -- nothing here, and nothing
+# at run time. See kernel/cuda/howto.txt. model/mira.py imports no third-party kernel at all;
+# its only fallback is pairwise_scan, which is ours and is the reference the cubins are checked
+# against.
+#
+
+# NO mamba-ssm, NO causal-conv1d, NO flash-linear-attention, NOT EVEN AS A COMMENT.
+#
+#     "i commented out on requirements.txt we don't add them. i'll manually add into my
+#      private test script. dont add mamba-ssm ... into my requirements"       -- 2026-08-14
+#
+# They are the profiler's BASELINES, not this project's dependencies -- no trainer, model or
+# evaluation path imports them. A `pip install mamba-ssm` line here is also actively dangerous
+# on Alliance Canada: mamba-ssm declares torch, so pip resolved it and UNINSTALLED
+# torch 2.13.0+computecanada in favour of a generic PyPI wheel. That happened, from a line I
+# put in this file.
+#
+# tools/baselines.py documents what they are and what is lost without them. Installing them is
+# the user's own business, in the user's own script.

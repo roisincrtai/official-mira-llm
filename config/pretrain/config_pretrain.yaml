@@ -1,0 +1,88 @@
+# config_pretrain.yaml -- the pretraining settings. THE ONE PRETRAIN YAML: there is no
+# config_<scheme>.yaml under config/pretrain/. mira-m is the default scheme and FineWeb-Edu
+# sample-100BT (llm-pretrain-fineweb-edu-100BT) is the training corpus.
+#
+# Written by `python -m tools.config_wizard` --scheme mira-m, from default_config.py's own values.
+# Another scheme is a different mira_config below; context_window, batch and pretrain_steps give
+# the other schemes' values in a comment, to be set by hand with it.
+# EVERY configurable setting is listed, at the value it has today, so that changing one is
+# editing a line rather than working out which line to add.
+#
+#     default_config.py   <   THIS FILE   <   the flags on the command line
+#
+# THE SELECTED TRAINER READS IT through --config. Stage defaults live under config/<stage>/:
+#
+# Pass `--config config/pretrain/config_pretrain.yaml` to the intended stage script or trainer. A command-line setting
+# passed after the yaml still wins over the value written here.
+#
+# WHAT THAT COSTS, SAID HERE RATHER THAN DISCOVERED LATER. This file is read OVER
+# default_config.py, so while it exists a NEW DEFAULT THERE CHANGES NOTHING FOR YOU: the value
+# written here wins, whatever the repository later decides. That is the price of having every
+# knob in one editable place. To take a new default, edit the line here -- or delete this file
+# and write it again from what default_config.py says then.
+#
+# A BLANK VALUE SETS NOTHING and default_config.py's own value stands.
+# THIS IS mira-m's pretrain TEMPLATE. Its scheme-owned values are pinned from
+# default_config.py rather than being left for MIRA_CONFIG to decide at run time.
+#
+# The format is a small subset of YAML: KEY: value, comments to end of line, no lists and no
+# nesting. Values are strings as written -- 2e-5 reaches the trainer as the four characters
+# typed here -- and the trainer's own argparse decides the type.
+
+# 1. interpreter
+  py:                          python            # which interpreter the stage scripts run
+
+# 2. runtime -- where and how the process runs
+  gpu:                         auto
+  seed:                        0
+# inference -- the prefix cache, used by evaluation and chat; training never passes one
+  prefix_cache:                1                 # 1 enables it in inference paths that ask
+  prefix_cache_size:           2                 # ceiling in GiB
+
+# 3. data -- LOCAL DIRECTORIES ONLY
+  pretrain_dir:                data/download/llm-pretrain-fineweb-edu-100BT # FineWeb-Edu sample-100BT
+
+# 4. model -- what is built, read by EVERY stage
+  mira_config:                 mira-m            # mira-xs | mira-s | mira-m | mira-l
+  mira_cuda_bin:               mira_dspv2
+  context_window:              4096 # mira-m's own context window
+  #                            mira-s 512,1024; mira-l 1024,2048,4096,8192,16384,32768
+
+# 5. optimisation -- shared by every trainer; per-stage rates are per stage
+  grad_checkpoint:             1
+  mira_cuda_kernel:            build/kernel/cuda # exported; where the cubins are
+  libbpe:                      build/tokenizer/cpp/libbpe.so # the C++ tokenizer; commented out, the Python one
+  mixed_precision:             1                 # 0 passes --no-mixed_precision
+  batch:                       16                 # sequences per GPU, sized for about 36 GiB
+  #                            mira-s 50; mira-l 1
+  micro_batch:                 0
+  loss_chunk:                  0
+  distributed_parallelism:    fsdp-channel
+  kv_cache:                    1                 # 0 passes --no-kv_cache
+  kv_cache_size:               2.0
+  lr_schedule:                 cosine
+  final_lr:                    1e-6              # final learning rate of the cosine schedule
+  warmup_steps:                1000
+  adam_beta1:                  0.9
+  adam_beta2:                  0.999             # GPT-2 / Qwen; torch's own default is 0.999
+  weight_decay:                0.0               # decoupled, AdamW
+  grad_clip:                   1.0               # global gradient norm; 0 = off
+  adam_eps:                    1e-8
+
+# 6. reporting -- figures, checkpoints, resume
+  plot_every:                  200
+  print_samples_every:         200
+  ckpt_every:                  200
+  no_resume:                   0                 # 1 passes --no-resume
+
+# 8. advanced -- reach anything in default_config.py without a key here
+  extra_set:                                     # free text, e.g. --set MODEL.n_head=16
+  common_flags:                                  # free text, prepended to every stage
+
+# stage 6 -- pretraining
+  pretrain_steps:                            # mira-m's own budget, SCHEME_STEPS
+  #                            mira-s 60000; mira-l 24920
+  peak_lr:                     2e-05
+  pretrain_flags:
+
+  pretrain_epochs:             1

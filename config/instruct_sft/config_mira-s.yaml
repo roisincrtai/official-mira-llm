@@ -1,0 +1,90 @@
+# config_mira-s.yaml -- settings for the selected trainer only.
+#
+# Written by `python -m tools.config_wizard` --scheme mira-s, from default_config.py's own values.
+# EVERY configurable setting is listed, at the value it has today, so that changing one is
+# editing a line rather than working out which line to add.
+#
+#     default_config.py   <   THIS FILE   <   the flags on the command line
+#
+# THE SELECTED TRAINER READS IT through --config. Stage defaults live under config/<stage>/:
+#
+# Pass `--config config/instruct_sft/config_mira-s.yaml` to the intended stage script or trainer. A command-line setting
+# passed after the yaml still wins over the value written here.
+#
+# WHAT THAT COSTS, SAID HERE RATHER THAN DISCOVERED LATER. This file is read OVER
+# default_config.py, so while it exists a NEW DEFAULT THERE CHANGES NOTHING FOR YOU: the value
+# written here wins, whatever the repository later decides. That is the price of having every
+# knob in one editable place. To take a new default, edit the line here -- or delete this file
+# and write it again from what default_config.py says then.
+#
+# A BLANK VALUE SETS NOTHING and default_config.py's own value stands.
+# THIS IS mira-s's instruct_sft TEMPLATE. Its scheme-owned values are pinned from
+# default_config.py rather than being left for MIRA_CONFIG to decide at run time.
+#
+# The format is a small subset of YAML: KEY: value, comments to end of line, no lists and no
+# nesting. Values are strings as written -- 2e-5 reaches the trainer as the four characters
+# typed here -- and the trainer's own argparse decides the type.
+
+# 1. interpreter
+  py:                          python            # which interpreter the stage scripts run
+
+# 2. runtime -- where and how the process runs
+  gpu:                         auto
+  seed:                        0
+# inference -- the prefix cache, used by evaluation and chat; training never passes one
+  prefix_cache:                1                 # 1 enables it in inference paths that ask
+  prefix_cache_size:           2                 # ceiling in GiB
+
+# 3. data -- LOCAL DIRECTORIES ONLY
+  tokenizer:                   bpe-instruct    # bpe-sft-coder + the three turn markers
+  dataset:                     hh
+  instruct_dir:                data/download/llm-rlhf-instruction-following
+  sft_dir:                     data/download/llm-ultrachat
+  data_limit:                  0
+  val_frac:                    0.05
+
+# 4. model -- what is built, read by EVERY stage
+  mira_config:                 mira-s
+  mira_cuda_bin:               mira_dspv2
+  context_window:                                # instruct-sft has NO fixed window:
+                                                 # a batch is whole conversations padded
+                                                 # to the longest of them
+
+# 5. optimisation -- shared by every trainer; per-stage rates are per stage
+  grad_checkpoint:             0
+  mira_cuda_kernel:            build/kernel/cuda # exported; where the cubins are
+  libbpe:                      build/tokenizer/cpp/libbpe.so # the C++ tokenizer; commented out, the Python one
+  mixed_precision:             1                 # 0 passes --no-mixed_precision
+  loss_chunk:                  0
+  distributed_parallelism:    fsdp-channel
+  kv_cache:                    1                 # 0 passes --no-kv_cache
+  kv_cache_size:               2.0
+  lr_schedule:                 cosine
+  final_lr:                    2e-5              # final learning rate of the cosine schedule
+  warmup_steps:                0
+  adam_beta1:                  0.9
+  adam_beta2:                  0.999             # GPT-2 / Qwen; torch's own default is 0.999
+  weight_decay:                0.0               # decoupled, AdamW
+  grad_clip:                   1.0               # global gradient norm; 0 = off
+  adam_eps:                    1e-8
+
+# 6. reporting -- figures, checkpoints, resume
+  plot_every:                  2000
+  print_samples_every:         2000
+  ckpt_every:                  2000
+  no_resume:                   0                 # 1 passes --no-resume
+
+# 8. advanced -- reach anything in default_config.py without a key here
+  extra_set:                                     # free text, e.g. --set MODEL.n_head=16
+  common_flags:                                  # free text, prepended to every stage
+
+# stage 7 -- supervised fine-tuning
+  sft_batch:                   8
+  sft_micro_batch:             1
+  sft_steps:                   50000
+  sft_lr:                      2e-05
+  sft_flags:
+  sft_subsets:                 helpful_train,harmless_train
+  sft_limit:                   0
+  sft_ckpt_dir:                checkpoints/instruct_sft   # <scheme>_<dataset> is appended
+  sft_checkpoint:                                         # blank = stage 6, then checkpoints/benchmark/

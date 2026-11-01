@@ -1,0 +1,189 @@
+# config_download.yaml -- every dataset this pipeline fetches, in one mapping.
+#
+# Adding a dataset means adding one mapping here and nowhere else. Stage 1 downloads every
+# entry. All trainers remain offline and read only the corresponding local directory under
+# data/download/. Dataset layout is preserved exactly as published.
+#
+# `category` IS WHAT STAGE 4 DOES WITH THE CORPUS:
+#
+#     pretrain        tokenise into a stream; no mask sidecar
+#     instruct-sft    tokenise into a stream AND write .masks beside every shard
+#     instruct-rlhf   do not tokenise; the preference trainers encode their pairs on the fly
+#     absent          do not tokenise; the entry is not a training corpus
+#
+# The evaluation sets and the `type: model` tokenizer entries carry none. A category on a
+# `type: model` entry is refused, as is a value outside those three.
+
+datasets:
+  llm-pretrain-wikitext103:
+    repo: roisincrtai/llm-pretrain-wikitext103
+    category: pretrain
+    description: "pretraining corpus for MiraLLM-Tiny: WikiText-103"
+
+  llm-pretrain-fineweb-edu-2BT:
+    repo: roisincrtai/llm-pretrain-fineweb-edu-2BT
+    category: pretrain
+    description: "pretraining corpus for MiraLLM-S: the ~2B-token (~10 GB) FineWeb-Edu subset"
+
+  # THE UPSTREAM REPOSITORY, AND ONE CONFIG OF IT. HuggingFaceFW/fineweb-edu publishes the whole
+  # dataset plus per-dump configs and three random samples; allow_patterns takes sample/10BT and
+  # nothing else, which is the 14 parquet files this corpus has always been. Without the pattern
+  # the fetch would take the full dataset.
+  #
+  # THE FILES KEEP THE PUBLISHED PATH, so they land under sample/10BT/ inside the dataset
+  # directory rather than at its top level. corpus_files walks recursively and PRETRAIN's
+  # exclude_dirs are test, valid and validation, so the corpus reader finds them unchanged.
+  llm-pretrain-fineweb-edu-10BT:
+    repo: HuggingFaceFW/fineweb-edu
+    category: pretrain
+    allow_patterns: "sample/10BT/*.parquet"
+    description: "pretraining corpus for MiraLLM-L: the sample-10BT config of FineWeb-Edu, 14 parquet shards, ~10B GPT-2 tokens"
+
+  # THE SAME REPOSITORY, THE sample-100BT CONFIG, fetched exactly as the 10BT entry above:
+  # allow_patterns takes sample/100BT and nothing else, and the files keep the published path,
+  # landing under sample/100BT/ in data/download/llm-pretrain-fineweb-edu-100BT/. 140 parquet
+  # shards, 286 GB on the hub. The pretraining corpus (config/pretrain/config_pretrain.yaml,
+  # PRETRAIN_CORPUS["mira-m"], a tokenize pair).
+  llm-pretrain-fineweb-edu-100BT:
+    repo: HuggingFaceFW/fineweb-edu
+    category: pretrain
+    allow_patterns: "sample/100BT/*.parquet"
+    description: "pretraining corpus: the sample-100BT config of FineWeb-Edu, 140 parquet shards, 286 GB, ~100B GPT-2 tokens"
+
+  the-stack-smol-xs:
+    repo: roisincrtai/the-stack-smol-xs
+    category: pretrain
+    description: "code pretraining corpus: 87 programming languages, 100 files each, 8,700 rows and 102 MB"
+
+  # THE PREFERENCE PAIRS COME FROM ANTHROPIC DIRECTLY, and alpaca_gpt4 is not fetched.
+  #
+  # Anthropic/hh-rlhf publishes four subsets plus red-team-attempts, each as
+  # <subset>/{train,test}.jsonl.gz, records of {chosen, rejected} transcripts.
+  # allow_patterns takes the four preference subsets and leaves red-team-attempts, which is not
+  # preference data. Stage 9 rolls out on the prompts of these same records -- RLHF["prompt_dir"]
+  # is HH_DIR -- so dropping alpaca_gpt4 removes a prompt bank nothing used by default.
+  llm-rlhf-instruction-following:
+    repo: Anthropic/hh-rlhf
+    category: instruct-rlhf
+    allow_patterns: "harmless-base/*,helpful-base/*,helpful-online/*,helpful-rejection-sampled/*"
+    description: "preference pairs for stages 8, 9, 10 and 11: Anthropic hh-rlhf, four subsets, {chosen, rejected} transcripts"
+
+  # llm-instruction-following-sft-tulu-3-mixture IS COMMENTED OUT, NOT REMOVED.
+  #
+  # It was stage 7's instruction corpus. llm-ultrachat below is what stage 7 fine-tunes on now,
+  # which is what default_config.SFT_DIR already named; config_user.yaml no longer overrides
+  # sft_dir. Restore by undoing this block.
+  #   llm-instruction-following-sft-tulu-3-mixture:
+  #     repo: roisincrtai/llm-instruction-following-sft-tulu-3-mixture
+  #     category: instruct-sft
+  #     description: "stage 7 instruction SFT: the Tulu 3 SFT mixture, 939k conversations as `messages` turns in 6 parquet shards"
+
+  llm-ultrachat:
+    repo: roisincrtai/llm-ultrachat
+    category: instruct-sft
+    description: "instruction tuning: UltraChat multi-round dialogues, 8.65 GiB in ten JSONL shards (train only); rows are {id, data} where `data` is the LIST of alternating turns, not a text column"
+
+  # llm-cot-countdown-game-20k IS COMMENTED OUT, NOT REMOVED.
+  #
+  # It was stage 10's default task. llm-grpo-cot-gsm8k below is the default now (COT["task"] is
+  # "gsm8k" and config_user.yaml sets cot_task: gsm8k). The countdown verifier, its prompts and
+  # COT_COUNTDOWN_DIR all remain, so COT_TASK=countdown still resolves to its own directory --
+  # it just has no data unless this block is undone.
+  #   llm-cot-countdown-game-20k:
+  #     repo: roisincrtai/llm-cot-countdown-game-20k
+  #     category: instruct-rlhf
+  #     description: "stage 10 GRPO: 20k Countdown arithmetic problems, each with a target, its numbers and a reference trace"
+
+  # GSM8K COMES FROM OPENAI DIRECTLY, AND ONLY ITS `main` CONFIG.
+  #
+  # openai/gsm8k publishes two configs of the SAME 7,473 train and 1,319 test problems: `main`,
+  # whose reasoning is worked prose, and `socratic`, whose reasoning is rewritten as a
+  # question-and-answer dialogue. allow_patterns takes main and leaves socratic, because
+  # fetching both would put every question in the bank twice under two different demonstration
+  # formats -- and main is the split every published GSM8K number is quoted on.
+  #
+  # THE RECORDS ARE {question, answer} AND `answer` IS THE WHOLE WORKED SOLUTION, ending in a
+  # "#### N" line. There is no separate reasoning field, so cot.run.load_problems takes the
+  # whole text as the trace and reads the gold off that line. The files are parquet, named
+  # main/train-00000-of-00001.parquet, so the split is in the file name.
+  #
+  # THE LOCAL DIRECTORY IS UNCHANGED: this entry's KEY names it, and the key is what
+  # default_config.COT_GSM8K_DIR is built from. Only the repository moved.
+  llm-grpo-cot-gsm8k:
+    repo: openai/gsm8k
+    category: instruct-rlhf
+    allow_patterns: "main/*"
+    description: "stage 10 GRPO: GSM8K grade-school word problems, the `main` config, 7,473 train and 1,319 test as {question, answer} parquet where `answer` is the worked solution ending in #### N"
+
+  llm-pretrain-gaelic-uccix-irish-textual-corpus:
+    repo: roisincrtai/llm-pretrain-gaelic-uccix-irish-textual-corpus
+    category: pretrain
+    description: "stage 12 language adaptation: the UCCIX Irish textual corpus (Gaelic)"
+
+  llm-hellaswag:
+    repo: roisincrtai/llm-hellaswag
+    description: "evaluation only, never trained on: HellaSwag commonsense completions, scored for perplexity and token accuracy beside WikiText-103"
+
+  llm-lambada:
+    repo: roisincrtai/llm-lambada
+    description: "evaluation only, never trained on: LAMBADA final-word passages, scored for perplexity and token accuracy beside WikiText-103"
+
+  # THE WHOLE TEST SPLIT, EVERY SUBJECT -- AND NOT THE WHOLE REPOSITORY. test is the split published
+  # MMLU numbers are quoted on: 14,042 questions against validation's 1,531, and 3.5 MB of parquet.
+  # allow_patterns takes the two splits the evaluation needs, across all fifty-seven subjects: test,
+  # which is scored, and dev, which is five worked examples per subject and is where the few-shot
+  # prompts come from.
+  #
+  # auxiliary_train IS EXCLUDED BY THE PATTERN AND MUST STAY EXCLUDED. It is 99,842 rows and 47.5 MB
+  # -- training data this pipeline must never see -- and it is the reason this field exists at all.
+  #
+  # VALIDATION IS NO LONGER FETCHED, and the copies an earlier run already downloaded are left where
+  # they are: snapshot_download adds files and removes none, so EVAL_SPLIT can go back to validation
+  # without re-fetching anything.
+  #
+  # ALL FIFTY-SEVEN ARE FETCHED, deliberately. Restricting the download to whichever subjects
+  # benchmark/evaluate_mmlu.py currently names would mean re-fetching every time that list changes,
+  # which is a worse trade than the megabytes. The evaluation reads only the subjects it names.
+  #
+  # THE `all` CONFIG COMES ALONG and is not used. It is the same rows concatenated under all/, and
+  # evaluate_mmlu.py selects files by subject directory, so it never reads them. Leaving it in costs
+  # a few megabytes; excluding it would need an ignore_patterns field that nothing else wants.
+  mmlu:
+    repo: cais/mmlu
+    allow_patterns: "*test*.parquet,*dev*.parquet"
+    description: "evaluation only, never trained on and never tokenised: MMLU's ENTIRE test split plus dev, every subject, scored by log-likelihood over the four answer letters by benchmark/evaluate_mmlu.py on the subjects it names"
+
+  # ARC FROM ALLEN AI DIRECTLY, BOTH SUBSETS, AND ONLY THE TWO SPLITS THE EVALUATION READS.
+  # allenai/ai2_arc publishes ARC-Easy and ARC-Challenge, each as train, validation and test
+  # parquet. allow_patterns takes test, which is scored (2,376 ARC-Easy and 1,172 ARC-Challenge
+  # questions), and train, which is where the few-shot exemplars come from; validation stays on
+  # the hub. The files keep the published path, ARC-Easy/ and ARC-Challenge/ inside
+  # data/download/ai2_arc/.
+  ai2_arc:
+    repo: allenai/ai2_arc
+    allow_patterns: "ARC-Easy/test-*.parquet,ARC-Easy/train-*.parquet,ARC-Challenge/test-*.parquet,ARC-Challenge/train-*.parquet"
+    description: "evaluation only, never trained on and never tokenised: ARC-Easy and ARC-Challenge, test scored and train for the few-shot exemplars, scored by log-likelihood over each question's answer choices by benchmark/evaluate_arc.py"
+
+  # llm-bpe-tokenizer-vocab-50259-on-corpus-fineweb-edu-2TB IS COMMENTED OUT, NOT REMOVED.
+  #
+  # It was the base vocabulary's publication and predated the tokenizer-<name> convention every
+  # other vocabulary follows. tokenizer-bpe-fineweb-edu-2BT replaces it below and
+  # default_config.BPE_DOWNLOAD_NAME points there. Restore by undoing this block.
+  #   llm-bpe-tokenizer-vocab-50259-on-corpus-fineweb-edu-2TB:
+  #     repo: roisincrtai/llm-bpe-tokenizer-vocab-50259-on-corpus-fineweb-edu-2TB
+  #     description: "not a corpus but a tokenizer: bpe/bpe.json at vocabulary 50,259 over FineWeb-Edu 2TB, used when checkpoints/bpe/bpe.json has not been built"
+
+  tokenizer-bpe-fineweb-edu-2BT:
+    repo: roisincrtai/tokenizer-bpe-fineweb-edu-2BT
+    type: model
+    description: "not a corpus but a tokenizer: the BASE vocabulary, used by --tokenizer bpe when checkpoints/bpe/bpe.json has not been built"
+
+  tokenizer-bpe-sft-coder:
+    repo: roisincrtai/tokenizer-bpe-sft-coder
+    type: model
+    description: "not a corpus but a tokenizer: the stage-12 vocabulary extended on code, used by --tokenizer bpe-sft-coder when checkpoints/bpe-sft-coder/bpe.json has not been built"
+
+  tokenizer-bpe-instruct:
+    repo: roisincrtai/tokenizer-bpe-instruct
+    type: model
+    description: "not a corpus but a tokenizer: the INSTRUCT vocabulary shared by instruct-sft, the reward model, RLHF and DPO -- bpe-sft-coder's bpe.json byte for byte plus special_tokens.json naming <|startofmessage|>, <|endofmessage|>, <startofthink> and <endofthink>; used by --tokenizer bpe-instruct when checkpoints/bpe-instruct/ has not been populated"

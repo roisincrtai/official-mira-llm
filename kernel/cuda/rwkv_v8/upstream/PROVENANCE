@@ -1,0 +1,41 @@
+VENDORED THIRD-PARTY SOURCE -- COPIED, NOT WRITTEN HERE.
+
+Project     RWKV-LM  --  https://github.com/BlinkDL/RWKV-LM
+Author      BlinkDL (Bo PENG) and the RWKV contributors
+Licence     Apache License 2.0.  The project's LICENSE file sits beside this one,
+            byte-for-byte as it ships upstream.
+Obtained    from the archive RWKV-LM-main.zip supplied by the user on 2026-08-16.
+            sha256(RWKV-LM-main.zip) =
+              c69f57e2e5b1fc1e29392f212c984a9bf9dac530008fe2916e9539a8ecb104ae
+Version     No commit hash and no version string upstream; the checksums below are
+            the identifiers.
+
+FILES, and where each came from inside the archive:
+
+  wkv7_cuda.cu   RWKV-LM-main/RWKV-v8/cuda/wkv7_cuda.cu
+                 sha256 ab9118adc588b21707806cd154ec9df4b1e8a490d383c40315ab2d09a7a69604
+  wkv7_op.cpp    RWKV-LM-main/RWKV-v8/cuda/wkv7_op.cpp
+                 sha256 b7e3586cca7f2ef8fd42ec1e2c5c65577d47a4e870ef9dd256a8d3c384f9e666
+  LICENSE        RWKV-LM-main/LICENSE
+                 sha256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+
+NOT ONE BYTE OF THOSE FILES WAS CHANGED.
+
+WHAT RWKV-8's CUDA ACTUALLY IS, since the file names invite the wrong guess.  It is
+the SAME wind_backstepping RWKV-7 WKV as RWKV-v5/cuda/wkv7_*, in fp32 instead of
+bf16.  `diff` against the RWKV-v7 copy is three lines in the .cu and one in the
+.cpp, all of them the scalar typedef:
+
+    RWKV-v7                                     RWKV-v8
+    using bf = __nv_bfloat16;                   using bf = float;
+    ...to_float(const bf& u){return __bfloat162float(u);}   { return u; }
+    ...to_bf(const float& u){return __float2bfloat16_rn(u);} { return u; }
+
+The difference is upstream's, not ours; both copies are vendored so the diff can be
+read here rather than taken on trust.
+
+RWKV-8 = RWKV-7 + ROSA.  ROSA (Rapid Online Suffix Automaton) is what is NEW in
+RWKV-8, and the archive ships NO CUDA for it -- ROSA is pure Python in every
+RWKV-v8/*.py file.  So this directory is the whole of RWKV-8's CUDA, and the ROSA
+half lives in baselines/rwkv_v8/upstream/.  See that directory's PROVENANCE for what
+that costs.

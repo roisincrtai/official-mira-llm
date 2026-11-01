@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Reference computations, model construction and CUDA kernel execution."><meta name="theme-color" content="#f7f9fc"><title>Implementation: PyTorch and CUDA. · MIRA</title><link rel="icon" href="../../../doc/html/assets/mira.svg" type="image/svg+xml"><link rel="stylesheet" href="../../../doc/html/css/site.css"><script src="../../../doc/html/js/site.js" defer></script><script src="../../../doc/html/js/cuda-diagram.js" defer></script></head>
+<body><a class="skip" href="#main">Skip to content</a><header><div class="nav-shell"><a class="brand" href="../../../index.html"><img src="../../../doc/html/assets/mira.svg" alt="" width="46" height="46"><span>MIRA<span class="brand-sub">Signal-Processing-Inspired LLM</span></span></a><button class="menu" aria-expanded="false" aria-controls="navigation">Menu</button><nav id="navigation" aria-label="Main navigation"><a href="introduction.html">Introduction</a><a href="motivation.html">Motivation</a><a href="results.html" hidden>Results</a><a href="quick-start.html">Pretraining MIRA</a><a href="customise.html">Customise LLM</a><a href="implementation.html" aria-current="page">Implementation</a><a href="../../../index.html#contact">Contact</a></nav></div></header><main id="main"><div class="page-head"><p class="eyebrow">MIRA / Implementation</p><h1>Implementation: PyTorch and CUDA.</h1><p class="lede">Reference computations, model construction and CUDA kernel execution.</p></div><div class="doc-layout"><aside><span class="eyebrow">On this page</span><a href="#overview">PyTorch and CUDA implementations</a><a href="#affine-dynamics">From lattice dynamics to an affine transition</a><a href="#associativity">Why affine transitions compose associatively</a><a href="#segment-dynamics">Separating preceding memory from segment dynamics</a><a href="#math-to-cuda">From the algebra to parallel CUDA execution</a><a href="#cuda-diagram">Interactive CUDA diagram</a><a href="#reference">PyTorch-style dynamics</a><a href="#layer">Residual layer structure</a><a href="#pytorch-model">PyTorch language-model implementation</a><a href="#cuda-schedule">CUDA: parallel execution</a><a href="#cuda-pseudocode">CUDA C++ pseudocode</a><a href="#cuda-fused">CUDA: fused kernels</a><a href="#cuda-build">Build and load the CUDA kernel</a><a href="#dataset">Load the training dataset</a><a href="#train">PyTorch training loop</a><a href="#run">Run the implementation</a></aside><article><section id="overview"><h2>PyTorch and CUDA implementations</h2><p>This page explains the computation behind MIRA: a readable PyTorch reference, an explicit language-model implementation, and CUDA execution of the recurrent dynamics. For the existing pretrainer, use <a href="quick-start.html">Pretraining MIRA</a>. For concise library usage and architecture composition, use <a href="customise.html">Customise LLM</a>.</p></section><section id="affine-dynamics"><h2>From lattice dynamics to an affine transition</h2><p>The starting point is the lattice scattering update. The control signals at token t determine the rotation and radius before the temporal recurrence is evaluated. Define the channel-diagonal maps:</p><div class="equation" tabindex="0">D<sub>t</sub><sup>(k)</sup> = diag(r<sub>t</sub><sup>(k)</sup> ⊙ cos θ<sub>t</sub><sup>(k)</sup>), &nbsp; E<sub>t</sub><sup>(k)</sup> = diag(r<sub>t</sub><sup>(k)</sup> ⊙ sin θ<sub>t</sub><sup>(k)</sup>)</div><p>Each map has shape d<sub>e</sub> × d<sub>e</sub> and acts on the channel axis of a signal with shape d<sub>e</sub> × d<sub>m</sub>. The token update is:</p><div class="equation" tabindex="0">U<sub>t</sub><sup>(k−1)</sup> = D<sub>t</sub><sup>(k)</sup> U<sub>t</sub><sup>(k)</sup> − E<sub>t</sub><sup>(k)</sup> V<sub>t−1</sub><sup>(k−1)</sup><br>V<sub>t</sub><sup>(k)</sup> = E<sub>t</sub><sup>(k)</sup> U<sub>t</sub><sup>(k)</sup> + D<sub>t</sub><sup>(k)</sup> V<sub>t−1</sub><sup>(k−1)</sup><br>U<sub>t</sub><sup>(K)</sup> = x̃<sub>t</sub> s<sub>t</sub><sup>⊤</sup>, &nbsp; V<sub>t</sub><sup>(0)</sup> = U<sub>t</sub><sup>(0)</sup></div><p>The stage index belongs to {1, …, K}; the within-token cascade is evaluated from K down to 1. Only the backward states at stages 0 through K−1 must be carried to the next token:</p><div class="equation" tabindex="0"><b>V</b><sub>t</sub> = (V<sub>t</sub><sup>(0)</sup>, …, V<sub>t</sub><sup>(K−1)</sup>)<sup>⊤</sup> ∈ ℝ<sup>Kd<sub>e</sub> × d<sub>m</sub></sup>, &nbsp; <b>V</b><sub>0</sub> = 0</div><h3>Eliminate the forward-stage dependencies</h3><p>Substitute the expression for U at the next higher stage repeatedly. The first expansion introduces one delayed state; the next introduces the next delayed state multiplied by the intervening D maps. Continuing to the injected signal gives:</p><div class="equation" tabindex="0">U<sub>t</sub><sup>(k)</sup> = (∏<sub>i=k+1</sub><sup>K</sup> D<sub>t</sub><sup>(i)</sup>) x̃<sub>t</sub> s<sub>t</sub><sup>⊤</sup><br> − ∑<sub>j=k+1</sub><sup>K</sup> (∏<sub>i=k+1</sub><sup>j−1</sup> D<sub>t</sub><sup>(i)</sup>) E<sub>t</sub><sup>(j)</sup> V<sub>t−1</sub><sup>(j−1)</sup></div><p>An empty product is the identity map and an empty sum is zero. At k=K this reduces to the injected signal. At k=0 it gives V<sub>t</sub><sup>(0)</sup> through the boundary condition. Substituting the expansion into the backward-state update gives, for k ∈ {1, …, K}:</p><div class="equation" tabindex="0">V<sub>t</sub><sup>(k)</sup> = E<sub>t</sub><sup>(k)</sup> (∏<sub>i=k+1</sub><sup>K</sup> D<sub>t</sub><sup>(i)</sup>) x̃<sub>t</sub> s<sub>t</sub><sup>⊤</sup><br> + D<sub>t</sub><sup>(k)</sup> V<sub>t−1</sub><sup>(k−1)</sup><br> − E<sub>t</sub><sup>(k)</sup> ∑<sub>j=k+1</sub><sup>K</sup> (∏<sub>i=k+1</sub><sup>j−1</sup> D<sub>t</sub><sup>(i)</sup>) E<sub>t</sub><sup>(j)</sup> V<sub>t−1</sub><sup>(j−1)</sup></div><h3>Collect the transition and the input contribution</h3><p>Every term is either linear in the preceding carried state or independent of it. The D and E maps, the projected input x̃<sub>t</sub>, and the write vector s<sub>t</sub> depend on the current token representation, not on the preceding carried state. Therefore the entire cascade is an affine transformation:</p><div class="equation" tabindex="0">𝒯<sub>t</sub> = (Φ<sub>t</sub>, <b>S</b><sub>t</sub>), &nbsp; 𝒯<sub>t</sub>(<b>V</b>) = Φ<sub>t</sub><b>V</b> + <b>S</b><sub>t</sub><br><b>V</b><sub>t</sub> = Φ<sub>t</sub><b>V</b><sub>t−1</sub> + <b>S</b><sub>t</sub></div><p>Φ<sub>t</sub> has shape Kd<sub>e</sub> × Kd<sub>e</sub>; <b>S</b><sub>t</sub> has shape Kd<sub>e</sub> × d<sub>m</sub>. Its block row k and block column j refer to carried stages k,j ∈ {0, …, K−1}. The first row follows from the closure V<sub>t</sub><sup>(0)</sup> = U<sub>t</sub><sup>(0)</sup>:</p><div class="equation" tabindex="0">(Φ<sub>t</sub>)<sub>0,j</sub> = −(∏<sub>i=1</sub><sup>j</sup> D<sub>t</sub><sup>(i)</sup>) E<sub>t</sub><sup>(j+1)</sup><br>(<b>S</b><sub>t</sub>)<sub>0</sub> = (∏<sub>i=1</sub><sup>K</sup> D<sub>t</sub><sup>(i)</sup>) x̃<sub>t</sub> s<sub>t</sub><sup>⊤</sup></div><p>For each remaining carried row k ∈ {1, …, K−1}, collecting the delayed-state terms gives:</p><div class="equation" tabindex="0">(Φ<sub>t</sub>)<sub>k,j</sub> = 0, &nbsp; j &lt; k−1<br>(Φ<sub>t</sub>)<sub>k,k−1</sub> = D<sub>t</sub><sup>(k)</sup><br>(Φ<sub>t</sub>)<sub>k,j</sub> = −E<sub>t</sub><sup>(k)</sup> (∏<sub>i=k+1</sub><sup>j</sup> D<sub>t</sub><sup>(i)</sup>) E<sub>t</sub><sup>(j+1)</sup>, &nbsp; j ≥ k<br>(<b>S</b><sub>t</sub>)<sub>k</sub> = E<sub>t</sub><sup>(k)</sup> (∏<sub>i=k+1</sub><sup>K</sup> D<sub>t</sub><sup>(i)</sup>) x̃<sub>t</sub> s<sub>t</sub><sup>⊤</sup></div><p>Stage K is included in the current token’s ladder readout, but is not an additional carried state. Its value follows directly from U<sub>t</sub><sup>(K)</sup> and V<sub>t−1</sub><sup>(K−1)</sup>. Because every D and E block is channel-diagonal, the transition separates into independent K × K systems across channels; the large block matrix is a mathematical representation, not a requirement to allocate a dense Kd<sub>e</sub> × Kd<sub>e</sub> tensor.</p></section><section id="associativity"><h2>Why affine transitions compose associatively</h2><p>Take two transitions in chronological order, t<sub>1</sub> &lt; t<sub>2</sub>. Apply the earlier transition first and substitute its result into the later one:</p><div class="equation" tabindex="0">𝒯<sub>t₂</sub>(𝒯<sub>t₁</sub>(<b>V</b>))<br> = Φ<sub>t₂</sub>(Φ<sub>t₁</sub><b>V</b> + <b>S</b><sub>t₁</sub>) + <b>S</b><sub>t₂</sub><br> = (Φ<sub>t₂</sub>Φ<sub>t₁</sub>)<b>V</b> + Φ<sub>t₂</sub><b>S</b><sub>t₁</sub> + <b>S</b><sub>t₂</sub></div><p>The pair composition is consequently:</p><div class="equation" tabindex="0">(Φ<sub>t₂</sub>, <b>S</b><sub>t₂</sub>) ⊙ (Φ<sub>t₁</sub>, <b>S</b><sub>t₁</sub>)<br> = (Φ<sub>t₂</sub>Φ<sub>t₁</sub>, Φ<sub>t₂</sub><b>S</b><sub>t₁</sub> + <b>S</b><sub>t₂</sub>)</div><p>Here ⊙ denotes composition of affine transitions; in the lattice equations it denotes a broadcast elementwise product. For three chronologically ordered transitions, either grouping expands to the same pair:</p><div class="equation" tabindex="0">(𝒯<sub>t₃</sub> ⊙ 𝒯<sub>t₂</sub>) ⊙ 𝒯<sub>t₁</sub><br> = (Φ<sub>t₃</sub>Φ<sub>t₂</sub>Φ<sub>t₁</sub>, Φ<sub>t₃</sub>Φ<sub>t₂</sub><b>S</b><sub>t₁</sub> + Φ<sub>t₃</sub><b>S</b><sub>t₂</sub> + <b>S</b><sub>t₃</sub>)<br> = 𝒯<sub>t₃</sub> ⊙ (𝒯<sub>t₂</sub> ⊙ 𝒯<sub>t₁</sub>)</div><p>This follows from matrix-multiplication associativity and distributivity. The identity transition is (I, 0). Composition is generally <strong>not commutative</strong>: regrouping is valid, but swapping tokens changes the result. A parallel scan can therefore combine neighboring pairs in a tree while preserving their temporal order. The equality is exact over real arithmetic; different floating-point evaluation orders can introduce rounding differences.</p></section><section id="segment-dynamics"><h2>Separating preceding memory from segment dynamics</h2><p>Let s be the position immediately before a segment. Compose the transitions of tokens s+1 through t. The segment remains an affine pair:</p><div class="equation" tabindex="0">Φ<sub>s→t</sub> = Φ<sub>t</sub>Φ<sub>t−1</sub>⋯Φ<sub>s+1</sub><br><b>S</b><sub>s→t</sub> = ∑<sub>j=s+1</sub><sup>t</sup> (Φ<sub>t</sub>Φ<sub>t−1</sub>⋯Φ<sub>j+1</sub>)<b>S</b><sub>j</sub><br><b>V</b><sub>t</sub> = Φ<sub>s→t</sub><b>V</b><sub>s</sub> + <b>S</b><sub>s→t</sub></div><p>The trailing product is the identity when j=t. The first term transports the memory accumulated before the segment. The second is the contribution generated inside the segment from a zero entry state; it does not depend on earlier tokens. Setting the entry state to zero isolates <b>S</b><sub>s→t</sub>. Propagating the K basis states with the additive injection suppressed, while retaining the same control signals, yields the channel-local transition Φ<sub>s→t</sub>.</p><p>This separation is the key to concurrent chunk processing: a chunk can compute its transition and zero-entry contribution before its actual entry state is known. Once the entry state is recovered, the same summary describes the chunk’s correct exit state.</p></section><section id="math-to-cuda"><h2>From the algebra to parallel CUDA execution</h2><p>Partition the sequence into C = ⌈T/L⌉ chunks, each with at most L tokens. The affine derivation leads directly to three CUDA phases:</p><ol><li><strong>Summarize chunks independently.</strong> Each chunk computes its affine pair from local token control signals. Its zero-entry state trajectory gives the input contribution; homogeneous propagation gives the transition. Parallel work spans chunks, channels and memory components.</li><li><strong>Scan the chunk boundaries.</strong> Compose chunk pairs in chronological order using the associative pair rule. An exclusive prefix gives each chunk the state accumulated before it; the first chunk receives the reset state. Only summaries and boundary states are exchanged.</li><li><strong>Replay chunks concurrently.</strong> Restart each chunk from its recovered entry state, restore its interior states and compute the gated ladder readout for every token. Zero-entry interior states from the first phase are not the final token states.</li></ol><h3>What the GPU needs to exchange</h3><p>For one sequence and channel, a chunk summary contains a K × K transition and a K × d<sub>m</sub> input contribution. The same transition acts on every memory component. Boundary composition therefore depends on the number of chunks and state dimensions, rather than on all interior token states. The kernels reuse channel-local transitions and keep carried state in registers where the selected path permits.</p><h3>Critical path and implementation choices</h3><p>With sequential composition of C chunk boundaries, the simple three-phase critical path is approximately 2L + C ≈ 2L + T/L, treating K as fixed. Its minimum occurs near L ≈ √(T/2), giving O(√T) depth for that schedule. Associativity also permits a parallel boundary scan: with sufficient workers, the ideal boundary depth is O(log C), giving O(L + log C) depth for the three phases. Actual depth depends on available workers, the chunk assignment and synchronization; these expressions are algorithmic bounds, not latency predictions.</p><p>The tensor reference below removes the Python loop over K by solving all forward-stage equations together. That solves the <em>within-token</em> stage dependencies. The affine composition derived above addresses the different problem of <em>across-token</em> parallelism and motivates the CUDA scan implementation described later on this page.</p><p><a href="#cuda-schedule">Continue to the CUDA execution details →</a></p></section><section id="cuda-diagram"><h2>Interactive CUDA execution diagram</h2><p>Explore the chunk-scan schedule for one sequence, one channel and a slice of memory. Each worker owns two consecutive chunks. The diagram reads from top to bottom: chunk summaries, boundary composition, entry states, and replay. Thread colors identify ownership; dashed arrows show exchanges between workers.</p><figure id="cuda-scan-diagram" class="cuda-diagram"><div class="scan-controls"><label>Worker threads <select data-workers><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label><label>Tokens per chunk <select data-chunk-length><option value="2" selected>2</option><option value="4">4</option><option value="8">8</option></select></label><span data-scan-size></span></div><div class="scan-phases" role="group" aria-label="CUDA phases"><button type="button" data-phase="summary" aria-pressed="false">(i) Summarize</button><button type="button" data-phase="compose" aria-pressed="false">(ii) Compose</button><button type="button" data-phase="replay" aria-pressed="true">(iii) Replay</button></div><div class="scan-playback"><button type="button" data-previous>Previous</button><button type="button" data-play aria-pressed="false">Play from start</button><button type="button" data-next>Next</button><label>Step <input type="range" data-scan-step min="0" max="7" value="7" aria-label="CUDA execution step"></label></div><p class="scan-step-name" data-step-label></p><p data-scan-description class="scan-explanation" role="status" aria-live="polite"></p><div class="scan-canvas" data-scan-canvas></div><figcaption class="caption">A pair contains the transition Φ and input contribution S for the displayed token interval. Solid arrows carry local information; dashed arrows exchange an earlier worker’s pair. The first preceding pair is the identity (I, 0), applied to the reset state V₀. The selected sizes illustrate the schedule; they do not specify the kernel’s launch configuration.</figcaption><noscript><p>The CUDA forward schedule has three phases: independently summarize chunks into affine pairs, compose the pairs to recover every entry state, and replay chunks concurrently to produce the outputs. Enable JavaScript to inspect each scan step.</p></noscript></figure></section><section id="reference"><h2>PyTorch-style dynamics</h2><p>This tensor reference computes all lattice stages together in one batched triangular solve per token, without a Python loop over K. It uses the cauchy_x_hyperbolic control signal maps. It receives projected control signals and write/read vectors; γ is already the SiLU gate. It omits padding masks, output projection, mixed-precision handling and the parallel kernel dispatch.</p><div class="code-wrap"><div class="code-label">python</div><pre><code>def lattice_readout(x_tilde, alpha, beta, rho, gamma, s, nu, V):
+    B, T, d_e = x_tilde.shape
+    K = V.shape[1]
+    identity = torch.eye(K + 1, dtype=x_tilde.dtype, device=x_tilde.device)
+    outputs = []
+    for t in range(T):
+        a = alpha[:, t]
+        b = beta[:, t]
+        decay = torch.exp(-a.abs())
+        cosine = 2 * decay / (1 + decay.square())
+        sine = torch.tanh(a)
+        radius = 1 / (1 + b.square())
+        diagonal = radius * cosine
+        coupling = radius * sine
+        delayed = V.transpose(1, 2)
+        injection = x_tilde[:, t, :, None] * s[:, t, None, :]
+        system = identity - torch.diag_embed(diagonal, offset=1)
+        rhs = torch.cat((
+            -coupling[..., None] * delayed,
+            injection.unsqueeze(2),
+        ), dim=2)
+        U = torch.linalg.solve_triangular(
+            system, rhs, upper=True, unitriangular=True
+        )
+        levels = torch.cat((
+            U[:, :, :1],
+            coupling[..., None] * U[:, :, 1:] + diagonal[..., None] * delayed,
+        ), dim=2)
+        V = levels[:, :, :K].transpose(1, 2)
+        read = torch.einsum(&quot;bckm,bkm-&gt;bkc&quot;, levels, nu[:, t])
+        y = (rho[:, t].transpose(1, 2) * read).sum(dim=1)
+        outputs.append(y * gamma[:, t])
+    return torch.stack(outputs, dim=1), V</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>For independent sequences, initialize V with zeros of shape [B, K, d<sub>e</sub>, d<sub>m</sub>]. The control signal arrays α and β have shape [B, T, d<sub>e</sub>, K], ρ has [B, T, d<sub>e</sub>, K+1], and ν has [B, T, K+1, d<sub>m</sub>]. The remaining Python loop advances tokens in causal order. Within each token, the upper-triangular system solves all forward-stage signals together; tensor operations then update every backward state and evaluate the ladder readout. The dedicated CUDA implementation uses its own parallel scan kernels. This reference expects FP32 or FP64 inputs. The current code uses cosine = sech(α) and sine = tanh(α).</p></section><section id="layer"><h2>Residual layer structure</h2><div class="code-wrap"><div class="code-label">python</div><pre><code>def forward(x):
+    x = x + mixer(rmsnorm_1(x))
+    x = x + feed_forward(rmsnorm_2(x))
+    return x</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>The dense feed-forward network uses a SiLU activation between its up and down projections. <code>MiraBlock.post_init(n_layer)</code> initializes lattice parameters and scales the residual output projections for the chosen depth.</p></section><section id="pytorch-model"><h2>PyTorch language-model implementation</h2><p>The following PyTorch reference defines embeddings, normalization, residual layers, feed-forward networks and the language-model head explicitly. The recurrent computation uses the public MIRA mixer. Together with the CUDA-loading, data and training sections below, these five Python blocks form one complete <code>custom_train.py</code> example.</p><div class="code-wrap"><div class="code-label">python</div><pre><code>import argparse
+import importlib
+import math
+import os
+from pathlib import Path
+
+import torch
+from torch import nn
+from torch.nn import functional as F
+from tqdm import trange
+
+from mira_llm import MiraMixer
+from helpers.token_store import TokenStream
+from pretrain.epoch import EpochCorpus
+from tools import config_file
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, width, eps=1e-8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(width))
+        self.eps = eps
+
+    def forward(self, x):
+        normalized = x.float() * torch.rsqrt(
+            x.float().square().mean(dim=-1, keepdim=True) + self.eps
+        )
+        return (normalized * self.weight.float()).to(x.dtype)
+
+
+class MiraLayer(nn.Module):
+    def __init__(self, width, depth, order, d_e, d_r, d_m, ffn_width):
+        super().__init__()
+        self.norm_mixer = RMSNorm(width)
+        self.mixer = MiraMixer(
+            width=width,
+            lattice_order=order,
+            d_e=d_e,
+            coefficient_bottleneck=d_r,
+            memory_dimension=d_m,
+        )
+        self.mixer.initialize_lattice_parameters()
+        self.norm_ffn = RMSNorm(width)
+        self.ffn = nn.Sequential(
+            nn.Linear(width, ffn_width),
+            nn.SiLU(),
+            nn.Linear(ffn_width, width),
+        )
+        std = 0.02 / math.sqrt(2 * depth)
+        nn.init.normal_(self.mixer.out_proj.weight, std=std)
+        nn.init.normal_(self.ffn[-1].weight, std=std)
+
+    def forward(self, x):
+        x = x + self.mixer(self.norm_mixer(x))
+        return x + self.ffn(self.norm_ffn(x))
+
+
+class CustomMiraLLM(nn.Module):
+    def __init__(self, vocab_size, width, depth, order, d_e, d_r, d_m, ffn_width):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, width)
+        self.layers = nn.ModuleList([
+            MiraLayer(width, depth, order, d_e, d_r, d_m, ffn_width)
+            for _ in range(depth)
+        ])
+        self.norm = RMSNorm(width)
+        self.head = nn.Linear(width, vocab_size, bias=False)
+
+    def forward(self, input_ids, targets=None, target_mask=None):
+        x = self.embedding(input_ids)
+        for layer in self.layers:
+            x = layer(x)
+        logits = self.head(self.norm(x))
+        loss = None
+        if targets is not None:
+            token_loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), targets.reshape(-1), reduction=&quot;none&quot;
+            ).view_as(targets)
+            if target_mask is None:
+                loss = token_loss.mean()
+            else:
+                per_sequence = (token_loss * target_mask).sum(dim=-1)
+                loss = (per_sequence / target_mask.sum(dim=-1).clamp_min(1)).mean()
+        return logits, loss</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div></section><section id="cuda-schedule"><h2>CUDA: parallel execution</h2><p>Each token defines an affine state transition. Adjacent transitions compose associatively: a chunk can summarize how it transforms an incoming state without knowing that state in advance. The manuscript partitions T tokens into chunks of length L and uses three phases:</p><ol><li><strong>Summarize.</strong> Process chunks concurrently from zero carried state and compute their transition summaries.</li><li><strong>Compose.</strong> Combine summaries at chunk boundaries to recover each chunk’s entry state.</li><li><strong>Replay.</strong> Process chunk interiors concurrently from the recovered states and produce the gated ladder readout.</li></ol><p>Work is distributed across token chunks, expanded channels and memory components. Carried state is held in registers where the selected kernel permits. See the <a href="results.html#cuda">reported kernel measurements</a> for the hardware and context length used in the manuscript.</p></section><section id="cuda-pseudocode"><h2>CUDA C++ forward pseudocode</h2><p>The following pseudocode maps the affine analysis to device computation. Each chunk kernel distributes sequence, chunk, channel and memory work across blocks and lanes. K is a compile-time lattice order, so the stage loops are unrolled. The boundary scan preserves chronological order.</p><p><code>Args</code>, <code>Plan</code>, <code>Mat</code> and <code>Vec</code> denote tensor accessors, a launch plan and small register fragments. Indexing, load/store and cooperative reduction helpers abstract the memory layout. The pseudocode describes the forward schedule illustrated above.</p><h3>Device primitives</h3><div class="code-wrap"><div class="code-label">CUDA C++</div><pre><code>struct Stage { float D, E; };
+
+__device__ Stage stage(float alpha, float beta) {
+    float r = 1.0f / (1.0f + beta * beta);
+    float decay = expf(-fabsf(alpha));
+    return {r * 2.0f * decay / (1.0f + decay * decay), r * tanhf(alpha)};
+}
+
+template &lt;int K&gt;
+__device__ void lattice_step(const Stage* control, float* V,
+                             float U, float* levels) {
+    #pragma unroll
+    for (int k = K; k &gt;= 1; --k) {
+        levels[k] = control[k].E * U + control[k].D * V[k - 1];
+        U = control[k].D * U - control[k].E * V[k - 1];
+    }
+    levels[0] = U;
+    #pragma unroll
+    for (int k = 0; k &lt; K; ++k) V[k] = levels[k];
+}
+
+struct Map { Mat Phi; Vec S; };
+
+__device__ Map compose(const Map&amp; later, const Map&amp; earlier) {
+    return {later.Phi * earlier.Phi,
+            later.Phi * earlier.S + later.S};
+}</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>The stage map uses the current hyperbolic rotation. A token step reads all delayed values before replacing the carried state. Affine composition always applies <code>earlier</code> first.</p><h3>(i) Summarize each chunk</h3><div class="code-wrap"><div class="code-label">CUDA C++</div><pre><code>template &lt;int K&gt;
+__global__ void summarize_chunks(Args a) {
+    auto [b, chunk, channel, memory_lane] = coordinates(a);
+    float V[K] = {}, basis[K] = {}, levels[K + 1];
+    bool memory_active = memory_lane &lt; a.memory;
+    bool basis_active = memory_lane &lt; K;
+    if (basis_active) basis[memory_lane] = 1.0f;
+
+    for (int t = first(chunk); t &lt; last(chunk); ++t) {
+        if (!a.valid(b, t)) continue;
+        Stage control[K + 1];
+        load_control_signals(control, a, b, t, channel);
+        if (memory_active) {
+            float U = a.x_tilde(b, t, channel) * a.s(b, t, memory_lane);
+            lattice_step&lt;K&gt;(control, V, U, levels);
+        }
+        if (basis_active)
+            lattice_step&lt;K&gt;(control, basis, 0.0f, levels);
+    }
+    if (memory_active) store_column(a.S(b, chunk, channel), memory_lane, V);
+    if (basis_active)
+        store_column(a.Phi(b, chunk, channel), memory_lane, basis);
+}</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>Zero carried state produces S. Basis propagation uses the same control signals with zero additive injection and produces columns of Φ. The logical lane range covers both K basis columns and d<sub>m</sub> memory columns. Separate active tests keep basis propagation valid even when K exceeds d<sub>m</sub>; the layout helpers tile these logical lanes over actual threads.</p><h3>(ii) Recover chunk entry states</h3><div class="code-wrap"><div class="code-label">CUDA C++</div><pre><code>__global__ void compose_boundaries(Args a, int chunks,
+                                   int workers, int chunks_per_worker) {
+    int unit = global_thread_index() / workers;
+    int worker = threadIdx.x % workers;
+    int lo = worker * chunks_per_worker;
+    int hi = min(chunks, lo + chunks_per_worker);
+
+    Map own = identity_map();
+    for (int chunk = lo; chunk &lt; hi; ++chunk)
+        own = compose(a.chunk_map(unit, chunk), own);
+
+    Map inclusive = own;
+    for (int distance = 1; distance &lt; workers; distance *= 2) {
+        Map earlier = group_shift_up_sync(inclusive, distance, workers);
+        if (worker &gt;= distance)
+            inclusive = compose(inclusive, earlier);
+    }
+    Map preceding = group_shift_up_sync(inclusive, 1, workers);
+    if (worker == 0) preceding = identity_map();
+
+    Vec V = preceding.Phi * a.initial_state(unit) + preceding.S;
+    for (int chunk = lo; chunk &lt; hi; ++chunk) {
+        a.entry_state(unit, chunk) = V;
+        Map current = a.chunk_map(unit, chunk);
+        V = current.Phi * V + current.S;
+    }
+}</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>Workers first fold their local chunks, then scan their pairs, then write the state entering each chunk. <code>group_shift_up_sync</code> reads the preceding scan level before any update is consumed: warp shuffles handle communication within a warp, and synchronized shared memory handles exchanges across warps. Worker groups are power-of-two sized and remain within a block; out-of-range workers contribute identity maps.</p><h3>(iii) Replay and compute the readout</h3><div class="code-wrap"><div class="code-label">CUDA C++</div><pre><code>template &lt;int K&gt;
+__global__ void replay_chunks(Args a) {
+    auto [b, chunk, channel, memory_lane] = coordinates(a);
+    bool memory_active = memory_lane &lt; a.memory;
+    float V[K] = {}, levels[K + 1];
+    if (memory_active)
+        load_column(V, a.entry_state(b, chunk, channel), memory_lane);
+
+    for (int t = first(chunk); t &lt; last(chunk); ++t) {
+        if (!a.valid(b, t)) {
+            if (memory_lane == 0) a.y(b, t, channel) = 0.0f;
+            continue;
+        }
+        if (memory_active &amp;&amp; a.training &amp;&amp; opens_fine_chunk(t))
+            store_column(a.saved_state(b, fine_index(t), channel), memory_lane, V);
+        Stage control[K + 1];
+        load_control_signals(control, a, b, t, channel);
+        float U = memory_active
+            ? a.x_tilde(b, t, channel) * a.s(b, t, memory_lane) : 0.0f;
+        lattice_step&lt;K&gt;(control, V, U, levels);
+        float readout = 0.0f;
+        #pragma unroll
+        for (int k = 0; k &lt;= K; ++k) {
+            float projected = memory_group_sum(
+                memory_active ? levels[k] * a.nu(b, t, k, memory_lane) : 0.0f);
+            readout += a.rho(b, t, channel, k) * projected;
+        }
+        if (memory_lane == 0)
+            a.y(b, t, channel) = silu(a.raw_gate(b, t, channel)) * readout;
+    }
+    if (memory_active &amp;&amp; last(chunk) == a.tokens)
+        store_column(a.final_state(b, channel), memory_lane, V);
+}
+
+template &lt;int K&gt;
+void forward(Args a, cudaStream_t stream) {
+    Plan plan = partition(a);
+    if (plan.chunks &gt; 1 || a.training) {
+        summarize_chunks&lt;K&gt;&lt;&lt;&lt;plan.chunk_grid, plan.chunk_block, 0, stream&gt;&gt;&gt;(a);
+        compose_boundaries&lt;&lt;&lt;plan.scan_grid, plan.scan_block, 0, stream&gt;&gt;&gt;(
+            a, plan.chunks, plan.workers, plan.chunks_per_worker);
+    }
+    replay_chunks&lt;K&gt;&lt;&lt;&lt;plan.chunk_grid, plan.chunk_block, 0, stream&gt;&gt;&gt;(a);
+}</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>The memory-group reduction contracts each stage’s state with its read direction ν. The ladder weights ρ combine stages and the SiLU gate γ selects the output. The following output projection is supplied by the model layer. Saved fine-chunk entry states support recomputation during backward. Launching the phases on one CUDA stream orders their global-memory dependencies. For a single inference chunk, its entry-state accessor supplies the initial state and the host can use replay directly.</p></section><section id="cuda-fused"><h2>CUDA: fused kernels</h2><p>The current pretraining YAML selects <code>mira_dspv2</code>. This self-contained package builds its own CUDA source into its own cubin. It includes chunked forward and backward paths, a tree scan, and fused scan paths.</p><p>Its specialized four-token path forms control signals and memory-read projections within the kernel using tensor cores, while the recurrence accumulates in FP32. Two groups of batch rows run offset token tiles to overlap control signal formation with recurrence work. Weight tiles are shared.</p><p>The four-token specialization targets K=2, d<sub>m</sub>=16 and d<sub>r</sub> in {16, 32, 48}, with additional dispatch conditions on precision, hardware and batch shape. Other supported cases use the package’s two-token or chunked paths. These dispatch choices preserve the model computation.</p></section><section id="cuda-build"><h2>Build and load the CUDA kernel</h2><p>Build the kernel from your clone before running the script:</p><div class="code-wrap"><div class="code-label">shell</div><pre><code>make -f kernel/cuda/mira_dspv2/Makefile build
+make -f kernel/cuda/mira_dspv2/Makefile check</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>The package and compiled-kernel directory come from your stage YAML:</p><div class="code-wrap"><div class="code-label">yaml</div><pre><code>mira_cuda_bin: mira_dspv2
+mira_cuda_kernel: build/kernel/cuda</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><div class="code-wrap"><div class="code-label">python</div><pre><code>def load_cuda_from_yaml(config_path, device):
+    settings = config_file.read(config_path)
+    package = settings[&quot;mira_cuda_bin&quot;]
+    kernel_root = settings.get(&quot;mira_cuda_kernel&quot;)
+    if kernel_root:
+        os.environ[&quot;MIRA_CUDA_KERNEL&quot;] = str(Path(kernel_root).resolve())
+    torch.cuda.set_device(device)
+    mixer_module = importlib.import_module(MiraMixer.__module__)
+    backend = mixer_module.use_mira_cuda(package)
+    if backend is None:
+        raise RuntimeError(f&quot;Could not import CUDA package: {package}&quot;)
+    ready, detail = backend.status(torch.cuda.current_device())
+    if not ready:
+        raise RuntimeError(f&quot;CUDA kernel could not load: {detail}&quot;)
+    print(f&quot;Loaded CUDA package {package} from {detail}&quot;, flush=True)</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>The loader checks that the compiled module can be loaded on the selected GPU. The mixer then dispatches to the package’s supported CUDA paths. The selected geometry and dtype determine which path is used; loading a module alone does not guarantee that every operation uses CUDA kernels.</p></section><section id="dataset"><h2>Load the training dataset</h2><p>Prepare a token stream with the project’s tokenization facility, as described in <a href="quick-start.html#tokenize">Pretraining MIRA</a>. Pass its stream stem, the path before <code>_index.json</code>, to this script. The reader verifies recorded content signatures before opening read-only memory maps.</p><div class="code-wrap"><div class="code-label">python</div><pre><code>def load_dataset(token_stem, context_length, vocab_size):
+    stream = TokenStream(token_stem)
+    if stream.n_tokens &lt; context_length + 1:
+        raise ValueError(&quot;The token stream is shorter than one training window&quot;)
+    if stream.head[&quot;vocab_size&quot;] != vocab_size:
+        raise ValueError(&quot;Token stream and model vocabulary sizes must match&quot;)
+    print(f&quot;Loaded dataset {token_stem}: {stream.n_tokens:,} tokens&quot;, flush=True)
+    return stream</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div></section><section id="train"><h2>PyTorch training loop</h2><p>This single-device example samples packed windows, shifts inputs and targets for next-token prediction, computes cross-entropy, and updates the model. It reads the learning rate from the YAML and uses a constant rate for this example. It derives one complete corpus pass at the configured context length, masks padding in the final batch, and resumes from an atomic checkpoint containing the architecture, optimizer and random states. The standard trainer provides the full configured schedule, context handling and distributed execution.</p><div class="code-wrap"><div class="code-label">python</div><pre><code>def train(model, stream, settings, device, checkpoint_path, seed):
+    batch_size = int(settings[&quot;batch&quot;])
+    context_length = int(settings[&quot;context_window&quot;].split(&quot;,&quot;)[0])
+    data = EpochCorpus(stream, [context_length], batch_size)
+    total_steps = data.steps
+    checkpoint_every = int(settings[&quot;ckpt_every&quot;])
+    if checkpoint_every &lt; 1:
+        raise ValueError(&quot;ckpt_every must be positive&quot;)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(settings[&quot;peak_lr&quot;]),
+        weight_decay=float(settings[&quot;weight_decay&quot;]),
+    )
+    generator = torch.Generator().manual_seed(seed)
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    first_step = 0
+    if checkpoint_path.exists() and settings.get(&quot;no_resume&quot;, &quot;0&quot;) == &quot;0&quot;:
+        saved = torch.load(checkpoint_path, map_location=&quot;cpu&quot;, weights_only=True)
+        if saved[&quot;settings&quot;] != settings or saved[&quot;architecture&quot;] != model.architecture:
+            raise ValueError(&quot;Checkpoint configuration does not match this run&quot;)
+        if saved[&quot;dataset_sig&quot;] != stream.sig:
+            raise ValueError(&quot;Checkpoint dataset does not match this token stream&quot;)
+        model.load_state_dict(saved[&quot;model&quot;])
+        optimizer.load_state_dict(saved[&quot;optimizer&quot;])
+        generator.set_state(saved[&quot;data_rng&quot;])
+        torch.set_rng_state(saved[&quot;torch_rng&quot;])
+        if device.type == &quot;cuda&quot;:
+            torch.cuda.set_rng_state_all(saved[&quot;cuda_rng&quot;])
+        first_step = saved[&quot;step&quot;]
+        print(f&quot;Loaded checkpoint {checkpoint_path} at step {first_step}&quot;, flush=True)
+    data.step = first_step
+    model.train()
+    for step in trange(first_step, total_steps, desc=&quot;Training&quot;):
+        ids, _, mask = data.batch(batch_size, context_length - 1, device=device)
+        optimizer.zero_grad(set_to_none=True)
+        _, loss = model(ids[:, :-1], ids[:, 1:], mask[:, 1:])
+        loss.backward()
+        grad_clip = float(settings[&quot;grad_clip&quot;])
+        if grad_clip &gt; 0:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+        print(f&quot;step={step + 1} loss={loss.item():.6f}&quot;, flush=True)
+        if (step + 1) % checkpoint_every == 0 or step + 1 == total_steps:
+            temporary = checkpoint_path.with_suffix(&quot;.tmp&quot;)
+            payload = {
+                &quot;step&quot;: step + 1,
+                &quot;architecture&quot;: model.architecture,
+                &quot;settings&quot;: settings,
+                &quot;dataset_sig&quot;: stream.sig,
+                &quot;model&quot;: model.state_dict(),
+                &quot;optimizer&quot;: optimizer.state_dict(),
+                &quot;data_rng&quot;: generator.get_state(),
+                &quot;torch_rng&quot;: torch.get_rng_state(),
+                &quot;cuda_rng&quot;: torch.cuda.get_rng_state_all() if device.type == &quot;cuda&quot; else [],
+            }
+            with temporary.open(&quot;wb&quot;) as handle:
+                torch.save(payload, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, checkpoint_path)</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div></section><section id="run"><h2>Run the implementation</h2><p>The entry point creates <code>CustomMiraLLM</code> directly, opens the dataset and enters the training loop. Geometry and vocabulary size are explicit arguments; the kernel package is selected only in YAML.</p><div class="code-wrap"><div class="code-label">python</div><pre><code>def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(&quot;--config&quot;, required=True)
+    parser.add_argument(&quot;--tokens&quot;, required=True)
+    parser.add_argument(&quot;--vocab-size&quot;, type=int, required=True)
+    for name in (&quot;width&quot;, &quot;depth&quot;, &quot;order&quot;, &quot;d-e&quot;, &quot;d-r&quot;, &quot;d-m&quot;, &quot;ffn-width&quot;):
+        parser.add_argument(&quot;--&quot; + name, type=int, required=True)
+    parser.add_argument(&quot;--device&quot;, default=&quot;cuda:0&quot;)
+    parser.add_argument(&quot;--checkpoint&quot;, default=&quot;checkpoints/custom_mira/model.pt&quot;)
+    args = parser.parse_args()
+    settings = config_file.read(args.config)
+    seed = int(settings.get(&quot;seed&quot;, &quot;0&quot;))
+    torch.manual_seed(seed)
+    device = torch.device(args.device)
+    if device.type == &quot;cuda&quot;:
+        load_cuda_from_yaml(args.config, device)
+    architecture = {
+        &quot;vocab_size&quot;: args.vocab_size, &quot;width&quot;: args.width, &quot;depth&quot;: args.depth,
+        &quot;order&quot;: args.order, &quot;d_e&quot;: args.d_e, &quot;d_r&quot;: args.d_r,
+        &quot;d_m&quot;: args.d_m, &quot;ffn_width&quot;: args.ffn_width,
+    }
+    if any(value &lt; 1 for value in architecture.values()):
+        raise ValueError(&quot;All architecture dimensions must be positive&quot;)
+    model = CustomMiraLLM(**architecture).to(device)
+    model.architecture = architecture
+    print(&quot;Created CustomMiraLLM with randomly initialized weights&quot;, flush=True)
+    context_length = int(settings[&quot;context_window&quot;].split(&quot;,&quot;)[0])
+    stream = load_dataset(args.tokens, context_length, args.vocab_size)
+    train(model, stream, settings, device, args.checkpoint, seed)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><div class="code-wrap"><div class="code-label">shell</div><pre><code>python custom_train.py   --config config/pretrain/config_pretrain.yaml   --tokens &quot;$TOKEN_STREAM_STEM&quot;   --vocab-size &quot;$VOCAB_SIZE&quot;   --width &quot;$MODEL_WIDTH&quot; --depth &quot;$MODEL_DEPTH&quot;   --order &quot;$LATTICE_ORDER&quot; --d-e &quot;$EXPANDED_WIDTH&quot;   --d-r &quot;$WRITE_BOTTLENECK&quot; --d-m &quot;$MEMORY_DIMENSION&quot;   --ffn-width &quot;$FFN_WIDTH&quot;</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div><p>Set the shell variables to your tokenizer, token-stream stem and chosen geometry. Run from the clone root so relative YAML paths resolve correctly. This example handles packed, unpadded windows; use the standard trainer for the project’s full pretraining workflow.</p></section></article></div></main><footer><a class="wordmark" href="../../../index.html">MIRA</a><p>Lattice–ladder dynamics for recurrent language modeling.</p><div><a href="../../../doc/html/pages/quick-start.html">Get started</a><a href="../../../index.html#contact">Contact</a><a href="#main">Back to top ↑</a></div></footer><div class="sr-only" id="announcement" role="status" aria-live="polite"></div></body></html>

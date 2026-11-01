@@ -1,0 +1,57 @@
+__pycache__
+.ipynb_checkpoints
+logs
+cache
+*.pt
+*.pth
+*.tgz
+*.tar
+.checkpoint_*
+saved_models/
+plots/
+outputs/
+*.swp
+*.bak*
+*.tgz
+*.tar
+tmp
+results
+.DS_Store
+*.ckpt
+*.pth
+saved_models
+bak
+plots*
+checkpoints
+private*
+
+build
+
+tmp
+
+venv
+
+# EXTERNAL DOWNLOADS ONLY. The corpora that ship WITH the repository live in builtin_data/
+# and are tracked; data/ is where anything fetched from elsewhere lands (data/download/...),
+# and none of it belongs in git -- it is large, it is someone else's, and it is reproducible
+# from the script that fetched it.
+data/
+
+__pycache__
+
+.trash/
+cache
+#config_user.yaml
+backup/
+.git-backup-*
+
+!*.yaml
+!*.yml
+
+# Manuscript figures are source assets and must remain versioned.
+!latex/manuscript/plots/
+!latex/manuscript/plots/**
+
+# Claude scratch: VM-side working files, never part of the project
+sessions/
+/official-homepage/

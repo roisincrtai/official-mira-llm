@@ -1,0 +1,396 @@
+# ==================================================================================================
+# config/default/config_mira.yaml -- the MIRA schemes, shared by every stage
+# A training yaml selects one with   mira_config: mira-s   (mira-xs | mira-s | mira-m | mira-l | mira-8b | mira-moe-8b)
+# ==================================================================================================
+#
+# KEYS OF EVERY SCHEME
+#   n_layers               number of MIRA layers
+#   d_model                d, model width
+#   ffn_width              f, FFN hidden width, default 4 d
+#   lattice_d_e            d_e, lattice width
+#   lattice_d_r            d_r, write bottleneck
+#   lattice_d_m            d_m, memory dimension
+#   lattice_K              K, lattice order
+#   lattice_modulus_map    radius map: cauchy, gaussian, expexp, expsoftplus or hill
+#   lattice_argument_map   rotation map: hyperbolic, mobius or identity
+#   lattice_initializer    see LATTICE_INITIALIZER
+#   lattice_init_horizon   see LATTICE_INIT_HORIZON
+#   lattice_init_freq      reserved for future
+#   moe_total_experts      E, routed FFN experts in each MoE layer, 1 (or absent) = no MoE
+#   moe_layers             [first,last], the layers whose FFN is MoE (n = 0 is the first MIRA block)
+#   moe_active_experts     A, routed experts active per token
+#   moe_expert_width       f_e, FFN hidden width of one expert
+#   moe_shared_experts     S, experts every token passes through, 0 = none
+#
+# --------------------------------------------------------------------------------------------------
+# LATTICE_MODULUS_MAP -- map beta to the stage modulus r
+#   cauchy        r = 1 / (1 + beta^2)
+#   gaussian      r = exp(-beta^2)
+#   expexp        r = exp(-exp(beta))
+#   expsoftplus   r = exp(-softplus(beta))
+#   hill          r = beta^2 / (1 + beta^2)
+#
+# LATTICE_ARGUMENT_MAP -- map alpha to the stage rotation (cos(theta), sin(theta))
+#   hyperbolic    cos(theta) = sech(alpha), sin(theta) = tanh(alpha)
+#   mobius        cos(theta) = 2 alpha / (1 + alpha^2), sin(theta) = (1 - alpha^2) / (1 + alpha^2)
+#   identity      theta = alpha, cos(theta) = cos(alpha), sin(theta) = sin(alpha)
+#   Every argument map satisfies cos(theta)^2 + sin(theta)^2 = 1.
+#   The two maps are independent; every modulus map can be paired with every argument map.
+#   Set lattice_modulus_map and lattice_argument_map separately in each scheme.
+#   Checkpoint model_cfg and config.json record both keys with these same names.
+#
+# MAP SHORT CODES -- run names use <modulus code>x<argument code>
+#   modulus map                    argument map
+#   cauchy        rcc              mobius        RMB
+#   gaussian      rgs              identity      RID
+#   expexp        ree              hyperbolic    RHB
+#   expsoftplus   res
+#   hill          rhl
+#   lattice_modulus_map: cauchy + lattice_argument_map: hyperbolic --> rccxRHB
+#   lattice_modulus_map: cauchy + lattice_argument_map: mobius     --> rccxRMB
+#
+# --------------------------------------------------------------------------------------------------
+# LATTICE_INITIALIZER -- the initial weights W and biases b of the coefficient projection
+#   (W_alpha, W_beta, W_rho, W_nu; b_alpha, b_beta, b_rho, b_nu), d_r its input width
+#   W_uniform_b_jeffreys
+#     horizons H_c, c = 1..d_e: the quantiles (c - 1/2)/d_e of the Jeffreys prior p(log lambda) ~ sqrt(I(lambda)),
+#       lambda = 1/H, I(lambda) = sum_{t=1}^{256} t exp(-2 lambda t), on lattice_init_horizon, randomly permuted
+#       over the channels
+#     pole pair exp(-1/H_c) exp(+-i w_c), w_c = 2 pi / P_c, P_c cycling 5, 7, 11, 17, 23, 31, 43, 61 over the
+#       channels; w_c = min(w_c, 2/H_c) when H_c >= 100
+#     b_alpha, b_beta: the step-down recursion of the pole polynomial gives reflection coefficients kappa_k;
+#       r_k = 1 - 2^-13 (1 - |kappa_k|), sin(theta_k) = kappa_k / r_k, inverted through the modulus and argument maps
+#     every weight (W_alpha, W_beta, W_rho, W_nu) from U(-0.02 sqrt(3), 0.02 sqrt(3))
+#     b_rho, b_nu: random sign, magnitude from U(s/4, s), s = (K+1)^(-1/4) / sqrt(d_r)
+#   W_jeffreys_b_uniform
+#     the poles of W_uniform_b_jeffreys put in the alpha/beta weight rows instead of the biases (control for b jeffreys):
+#       b_alpha, b_beta from U(-1/sqrt(d_r), 1/sqrt(d_r)); every entry of the alpha/beta weight row i set to
+#       (b*_i - b_i) / sum_j E[c_j], b*_i the W_uniform_b_jeffreys bias of the row, c = silu(to_control(z)) the
+#       d_r bottleneck units, E[c_j] with the RMS-normalized input z taken as N(0, I), so E[alpha], E[beta] at the start
+#       equal those of W_uniform_b_jeffreys
+#     W_rho, W_nu, b_rho, b_nu as W_uniform_b_jeffreys
+#   W_jeffreys_b_normal
+#     W_jeffreys_b_uniform with b_alpha, b_beta from N(0, 1/d_r)
+#   W_normal_b_jeffreys
+#     W_uniform_b_jeffreys, then every weight from N(0, 0.02^2); the biases are kept
+#   W_b_uniform
+#     W_uniform_b_jeffreys, then every weight and bias from U(-1/sqrt(d_r), 1/sqrt(d_r)), the PyTorch default
+#   W_b_normal
+#     W_uniform_b_jeffreys, then every weight and bias from N(0, 1/d_r)
+#   W_uniform_b_nested_jeffreys
+#     W_uniform_b_jeffreys with one horizon per pole pair m: the quantile ((c - 1/2)/d_e + phi_m) mod 1,
+#       phi_m = 0, 1/2, 1/4, 3/4, 1/8, ... (van der Corput); W_rho, W_nu scaled by (3/(K+1))^(1/4);
+#       the same as W_uniform_b_jeffreys at K = 2
+#   uniform_horizon_fixed_angles
+#     H_c from U(lo, hi) of lattice_init_horizon; pole pair j = 0..J-1 (J = floor(K/2)) radius exp(-(1 + j/J)/H_c),
+#       angle pi f_j, f = 1/4, 1/2, 3/4, 1/8, 3/8, 5/8, 7/8, 1/16; real pole (odd K) at -exp(-1/H_c)
+#     b_alpha, b_beta by the same recursion as W_uniform_b_jeffreys
+#     W_alpha, W_beta: random sign, magnitude from U(1/4, 1) min(|b|/(4 sqrt(d_r)), s), b the bias of the row
+#     W_rho, W_nu, b_rho, b_nu: random sign, magnitude from U(s/4, s)
+#   uniform_horizon_fixed_angles_right
+#     uniform_horizon_fixed_angles with every pole in the right half-plane: angles pi f_j,
+#       f = 1/4, 1/8, 3/8, 1/16, 3/16, 5/16, 7/16, 1/32, and the real pole at +exp(-1/H_c);
+#       the same as uniform_horizon_fixed_angles at K = 2
+#   alpha_beta_uniform
+#     W_alpha, W_beta, b_alpha, b_beta from U(-1/sqrt(d_r), 1/sqrt(d_r)); b_alpha, b_beta read as
+#       sin(theta) = (1 - b_alpha^2)/(1 + b_alpha^2), r = 1/(1 + b_beta^2) and mapped to the same poles under the
+#       modulus and argument maps; W_rho, W_nu, b_rho, b_nu as uniform_horizon_fixed_angles
+#
+# --------------------------------------------------------------------------------------------------
+# LATTICE_INIT_HORIZON -- a mapping of [lo,hi] ranges
+#   default:    [lo,hi]    every layer, eg 5,500 and 10,2000
+#   L<n>:       [lo,hi]    per-layer override: one layer (n = 0 is the first MIRA block)
+#   L<n>-<m>:   [lo,hi]    per-layer override: layers n..m (e.g. L1-3)
+#   comment an L line out when the initializer does not need it
+#
+# --------------------------------------------------------------------------------------------------
+# LATTICE_INIT_FREQ -- reserved for future
+#
+# --------------------------------------------------------------------------------------------------
+# THE SIZE COMMENT OF EACH SCHEME, from the model's layer shapes at that scheme's K and d_m
+#   per MIRA layer    mixer + FFN + two RMSNorm
+#     mixer           d (d_e + d_m) + (d d_r + d_r) + (d d_e + d_e) + (d_r + 1)(d_e (3K + 1) + d_m (K + 1)) + d_e d
+#     FFN             2 d f + f + d, f = ffn_width
+#     two RMSNorm     2 d
+#   per MoE layer     mixer + (E + S) experts + router + two RMSNorm; active: mixer + (A + S) experts + router + two RMSNorm
+#     one expert      2 d f_e + f_e + d, f_e = moe_expert_width
+#     router          d E
+#   embedding         V d, bpe V = 50,259, tied with the output head
+#   + 3 d             mask embedding and final RMSNorm (weight and bias)
+#   total             n_layers x per MIRA layer + embedding + 3 d
+#   state             K x d_e x d_m per layer, n_layers x K x d_e x d_m per sequence
+#   ratio             state per sequence / total parameters
+# ==================================================================================================
+
+# --------------------------------------------------------------------------------------------------
+# mira-xs  (K = 2, d = 512, d_e = 1024, d_r = 32, d_m = 16, 10 layers)
+#   parameters per MIRA layer             3,937,360
+#     mixer                               1,836,624
+#     FFN                                 2,099,712
+#     two RMSNorm                             1,024
+#   embedding (bpe V = 50,259, tied)     25,732,608
+#   mask embedding + final RMSNorm            1,536
+#   total parameters                     65,107,744   = 10 x 3,937,360 + 25,732,608 + 1,536
+#   state per layer                          32,768   = K x d_e x d_m = 2 x 1024 x 16
+#   state per sequence                      327,680   = n_layers x K x d_e x d_m
+#   state-to-parameter ratio               0.005033
+# --------------------------------------------------------------------------------------------------
+mira-xs:
+  n_layers:                    10
+  d_model:                     512
+  ffn_width:                   2048
+  lattice_d_e:                 1024
+  lattice_d_r:                 32
+  lattice_d_m:                 16
+  lattice_K:                   2
+  lattice_modulus_map:         cauchy
+  lattice_argument_map:        hyperbolic
+  lattice_initializer:         W_uniform_b_jeffreys
+  lattice_init_horizon:
+    default:  [1,1000]
+    L0:     [1,128]
+    #L1:    [2,256]
+    #L2:    [4,512]
+    #L3:    [8,1024]
+  #moe_total_experts:          1
+  #moe_layers:
+  #moe_active_experts:
+  #moe_expert_width:
+  #moe_shared_experts:         0
+  #lattice_init_freq:
+  #   default:
+
+# --------------------------------------------------------------------------------------------------
+# mira-s  (K = 2, d = 768, d_e = 1536, d_r = 48, d_m = 16, 12 layers)
+#   parameters per MIRA layer             8,842,848
+#     mixer                               4,118,880
+#     FFN                                 4,722,432
+#     two RMSNorm                             1,536
+#   embedding (bpe V = 50,259, tied)     38,598,912
+#   mask embedding + final RMSNorm            2,304
+#   total parameters                    144,715,392   = 12 x 8,842,848 + 38,598,912 + 2,304
+#   state per layer                          49,152   = K x d_e x d_m = 2 x 1536 x 16
+#   state per sequence                      589,824   = n_layers x K x d_e x d_m
+#   state-to-parameter ratio               0.004076
+# --------------------------------------------------------------------------------------------------
+mira-s:
+  n_layers:                    12
+  d_model:                     768
+  ffn_width:                   3072
+  lattice_d_e:                 1536
+  lattice_d_r:                 48
+  lattice_d_m:                 16
+  lattice_K:                   2
+  lattice_modulus_map:         cauchy
+  lattice_argument_map:        hyperbolic
+  lattice_initializer:         W_uniform_b_jeffreys
+  lattice_init_horizon:
+    default:  [1,1000]
+    L0:     [1,128]
+    #L1:    [2,256]
+    #L2:    [4,512]
+    #L3:    [8,1024]
+  #moe_total_experts:          1
+  #moe_layers:
+  #moe_active_experts:
+  #moe_expert_width:
+  #moe_shared_experts:         0
+  #lattice_init_freq:
+  #   default:
+
+# --------------------------------------------------------------------------------------------------
+# mira-m  (K = 2, d = 1024, d_e = 2048, d_r = 64, d_m = 64, 24 layers)
+#   parameters per MIRA layer            15,764,736
+#     mixer                               7,368,960
+#     FFN                                 8,393,728
+#     two RMSNorm                             2,048
+#   embedding (bpe V = 50,259, tied)     51,465,216
+#   mask embedding + final RMSNorm            3,072
+#   total parameters                    429,821,952   = 24 x 15,764,736 + 51,465,216 + 3,072
+#   state per layer                         262,144   = K x d_e x d_m = 2 x 2048 x 64
+#   state per sequence                    6,291,456   = n_layers x K x d_e x d_m
+#   state-to-parameter ratio               0.014637
+# --------------------------------------------------------------------------------------------------
+mira-m:
+  n_layers:                    24
+  d_model:                     1024
+  ffn_width:                   4096
+  lattice_d_e:                 2048
+  lattice_d_r:                 64
+  lattice_d_m:                 64
+  lattice_K:                   2
+  lattice_modulus_map:         cauchy
+  lattice_argument_map:        hyperbolic
+  lattice_initializer:         W_uniform_b_jeffreys
+  lattice_init_horizon:
+    default:  [1,2000]
+    L0:     [1,128]
+    #L1:    [2,256]
+    #L2:    [4,512]
+    #L3:    [8,1024]
+  #moe_total_experts:          1
+  #moe_layers:
+  #moe_active_experts:
+  #moe_expert_width:
+  #moe_shared_experts:         0
+  #lattice_init_freq:
+  #   default:
+
+# --------------------------------------------------------------------------------------------------
+# mira-l  (K = 2, d = 1024, d_e = 2048, d_r = 64, d_m = 64, 64 layers)
+#   parameters per MIRA layer            15,764,736
+#     mixer                               7,368,960
+#     FFN                                 8,393,728
+#     two RMSNorm                             2,048
+#   embedding (bpe V = 50,259, tied)     51,465,216
+#   mask embedding + final RMSNorm            3,072
+#   total parameters                  1,060,411,392   = 64 x 15,764,736 + 51,465,216 + 3,072
+#   state per layer                         262,144   = K x d_e x d_m = 2 x 2048 x 64
+#   state per sequence                   16,777,216   = n_layers x K x d_e x d_m
+#   state-to-parameter ratio               0.015821
+# --------------------------------------------------------------------------------------------------
+mira-l:
+  n_layers:                    64
+  d_model:                     1024
+  ffn_width:                   4096
+  lattice_d_e:                 2048
+  lattice_d_r:                 64
+  lattice_d_m:                 64
+  lattice_K:                   2
+  lattice_modulus_map:         cauchy
+  lattice_argument_map:        hyperbolic
+  lattice_initializer:         W_uniform_b_jeffreys
+  lattice_init_horizon:
+    default:  [1,2000]
+    L0:     [1,128]
+    #L1:    [2,256]
+    #L2:    [4,512]
+    #L3:    [8,1024]
+  #moe_total_experts:          1
+  #moe_layers:
+  #moe_active_experts:
+  #moe_expert_width:
+  #moe_shared_experts:         0
+  #lattice_init_freq:
+  #   default:
+
+# --------------------------------------------------------------------------------------------------
+# mira-5b  (K = 2, d = 3072, d_e = 6144, d_r = 192, d_m = 32, 36 layers)
+#   parameters per MIRA layer           141,155,616
+#     mixer                              65,636,640
+#     FFN                                75,512,832
+#     two RMSNorm                             6,144
+#   embedding (bpe V = 50,259, tied)    154,395,648
+#   mask embedding + final RMSNorm            9,216
+#   total parameters                  5,236,007,040   = 36 x 141,155,616 + 154,395,648 + 9,216
+#   state per layer                         393,216   = K x d_e x d_m = 2 x 6144 x 32
+#   state per sequence                   14,155,776   = n_layers x K x d_e x d_m
+#   state-to-parameter ratio               0.002704
+# --------------------------------------------------------------------------------------------------
+mira-5b:
+  n_layers:                    36
+  d_model:                     3072
+  ffn_width:                   12288
+  lattice_d_e:                 6144
+  lattice_d_r:                 192
+  lattice_d_m:                 32
+  lattice_K:                   2
+  lattice_modulus_map:         cauchy
+  lattice_argument_map:        hyperbolic
+  lattice_initializer:         W_uniform_b_jeffreys
+  lattice_init_horizon:
+    default:  [1,2000]
+    L0:     [1,128]
+    #L1:    [2,256]
+    #L2:    [4,512]
+    #L3:    [8,1024]
+  #moe_total_experts:          1
+  #moe_layers:
+  #moe_active_experts:
+  #moe_expert_width:
+  #moe_shared_experts:         0
+  #lattice_init_freq:
+  #   default:
+
+# --------------------------------------------------------------------------------------------------
+# mira-8b  (K = 2, d = 3072, d_e = 6144, d_r = 192, d_m = 32, 56 layers)
+#   parameters per MIRA layer           141,155,616
+#     mixer                              65,636,640
+#     FFN                                75,512,832
+#     two RMSNorm                             6,144
+#   embedding (bpe V = 50,259, tied)    154,395,648
+#   mask embedding + final RMSNorm            9,216
+#   total parameters                  8,059,119,360   = 56 x 141,155,616 + 154,395,648 + 9,216
+#   state per layer                         393,216   = K x d_e x d_m = 2 x 6144 x 32
+#   state per sequence                   22,020,096   = n_layers x K x d_e x d_m
+#   state-to-parameter ratio               0.002732
+# --------------------------------------------------------------------------------------------------
+mira-8b:
+  n_layers:                    56
+  d_model:                     3072
+  ffn_width:                   12288
+  lattice_d_e:                 6144
+  lattice_d_r:                 192
+  lattice_d_m:                 32
+  lattice_K:                   2
+  lattice_modulus_map:         cauchy
+  lattice_argument_map:        hyperbolic
+  lattice_initializer:         W_uniform_b_jeffreys
+  lattice_init_horizon:
+    default:  [1,2000]
+    L0:     [1,128]
+    #L1:    [2,256]
+    #L2:    [4,512]
+    #L3:    [8,1024]
+  #moe_total_experts:          1
+  #moe_layers:
+  #moe_active_experts:
+  #moe_expert_width:
+  #moe_shared_experts:         0
+  #lattice_init_freq:
+  #   default:
+
+# --------------------------------------------------------------------------------------------------
+# mira-moe-8b  (K = 2, d = 2048, d_e = 4096, d_r = 128, d_m = 64, 32 layers, MoE in layers 8-31)
+#   parameters per dense MIRA layer (0-7)        62,855,488
+#     mixer                                      29,286,720
+#     FFN                                        33,564,672
+#     two RMSNorm                                     4,096
+#   parameters per MoE MIRA layer (8-31)        298,053,952   active 63,000,896
+#     mixer                                      29,286,720
+#     64 routed experts (each 4,197,376)        268,632,064   active 8 x 4,197,376 = 33,579,008
+#     0 shared experts                                    0
+#     router                                        131,072
+#     two RMSNorm                                     4,096
+#   embedding (bpe V = 50,259, tied)            102,930,432
+#   mask embedding + final RMSNorm                    6,144
+#   total parameters                          7,759,075,328   = 8 x 62,855,488 + 24 x 298,053,952 + 102,930,432 + 6,144
+#   active parameters per token               2,117,801,984   = 8 x 62,855,488 + 24 x 63,000,896 + 102,930,432 + 6,144
+#   state per layer                                 524,288   = K x d_e x d_m = 2 x 4096 x 64
+#   state per sequence                           16,777,216   = n_layers x K x d_e x d_m
+#   state-to-parameter ratio                       0.002162
+# --------------------------------------------------------------------------------------------------
+mira-moe-8b:
+  n_layers:                    32
+  d_model:                     2048
+  ffn_width:                   8192
+  lattice_d_e:                 4096
+  lattice_d_r:                 128
+  lattice_d_m:                 64
+  lattice_K:                   2
+  lattice_modulus_map:         cauchy
+  lattice_argument_map:        hyperbolic
+  lattice_initializer:         W_uniform_b_jeffreys
+  lattice_init_horizon:
+    default:  [1,2000]
+    L0:     [1,128]
+    #L1:    [2,256]
+    #L2:    [4,512]
+    #L3:    [8,1024]
+  moe_total_experts:           64
+  moe_layers:                  [8,31]
+  moe_active_experts:          8
+  moe_expert_width:            1024
+  moe_shared_experts:          0
+  #lattice_init_freq:
+  #   default:

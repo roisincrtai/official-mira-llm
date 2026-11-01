@@ -1,0 +1,39 @@
+VENDORED THIRD-PARTY SOURCE -- COPIED, NOT WRITTEN HERE.
+
+Project     RWKV-LM  --  https://github.com/BlinkDL/RWKV-LM
+Author      BlinkDL (Bo PENG) and the RWKV contributors
+Licence     Apache License 2.0.  The project's LICENSE file sits beside this one,
+            byte-for-byte as it ships upstream.
+Obtained    from the archive RWKV-LM-main.zip supplied by the user on 2026-08-16.
+            sha256(RWKV-LM-main.zip) =
+              c69f57e2e5b1fc1e29392f212c984a9bf9dac530008fe2916e9539a8ecb104ae
+Version     A GitHub "-main.zip" snapshot carries no commit hash and the project
+            declares no version string; the archive and per-file checksums are the
+            only honest identifiers.
+
+FILES, and where each came from inside the archive:
+
+  wkv7_cuda.cu   RWKV-LM-main/RWKV-v5/cuda/wkv7_cuda.cu
+                 sha256 04c9edeff64824279cdc42fc29090592d33df7d50d5fb212916f9c42805086fe
+  wkv7_op.cpp    RWKV-LM-main/RWKV-v5/cuda/wkv7_op.cpp
+                 sha256 f417f8ee8adc57b45f64206caf38fbaba5dff575196bea288e4e351310717c4b
+  LICENSE        RWKV-LM-main/LICENSE
+                 sha256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+
+NOT ONE BYTE OF THOSE FILES WAS CHANGED.
+
+THE SAME wkv7 SOURCES APPEAR TWICE IN THE ARCHIVE and are identical: `diff` of
+RWKV-v5/cuda/wkv7_cuda.cu against RWKV-v7/train_temp/cuda/wkv7_cuda.cu is empty.
+RWKV-v5/ was taken because RWKV-v5/src/model.py is the file that also holds the
+RWKV-7 time mixing this kernel serves (RWKV_Tmix_x070), so the kernel and its
+caller come from one upstream file pair rather than two.
+
+THIS IS THE "wind_backstepping" KERNEL: a chunked RWKV-7 WKV in bf16, CHUNK_LEN 16,
+compiled with -D_C_=<head size> -D_CHUNK_LEN_=16.  RWKV-v7/train_temp/ additionally
+ships ten more fused .cu files for an experimental training stack; none of them were
+taken, because the benchmark swaps a MIXER into mira_llm's block and those kernels
+fuse the surrounding channel mixing, the loss and the head as well.
+
+HOW IT IS BUILT HERE.  Upstream compiles this pair at import time with
+torch.utils.cpp_extension.load; kernel/cuda/rwkv_v7/upstream.py does the same, with
+upstream's flags, against these files.

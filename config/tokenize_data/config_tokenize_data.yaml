@@ -1,0 +1,75 @@
+# config_tokenize_data.yaml -- tracked settings for run_scripts/run_tokenize_data.sh.
+#
+# The optional config_user.yaml in this directory overrides this file. An explicit --config
+# overrides both.
+#
+# THE CORPORA THIS STAGE TOKENISES ARE THE LIST BELOW, and they are pretraining corpora. Each
+# one is tokenised ALONE, into its own cache directory, under its own signature -- nothing is
+# merged. So adding a corpus costs exactly that corpus: every stream already built is found by
+# its unchanged signature and left untouched, which is what makes it safe to extend a run that
+# is already training.
+#
+# A CORPUS THAT IS NOT ON DISK IS SKIPPED, NOT AN ERROR. data/download/ holds whatever stage 1
+# fetched on this machine, and that differs between a laptop and a cluster. The stage reports
+# each missing directory and carries on with the rest, so one list serves every machine and
+# nobody has to maintain a per-machine copy.
+
+# interpreter
+  py:                          python3
+# inference -- the prefix cache, used by evaluation and chat; training never passes one
+  prefix_cache:                1                 # 1 enables it in inference paths that ask
+  prefix_cache_size:           2                 # ceiling in GiB
+
+# EVERY DATASET WHOSE `category` IS pretrain OR instruct-sft IS TOKENISED, whether or not it
+# appears below. The category in config/download/config_download.yaml is what decides, so a corpus is
+# added to this stage by giving it a category there and nowhere else. PRETRAIN_DIR remains what
+# THIS RUN TRAINS ON, and its entries are tokenised too.
+#
+# corpora to tokenise, comma-separated. Any of these that is absent under data/download/ is
+# skipped with a message.
+#   llm-pretrain-wikitext103         ~0.5 GB   English prose, text in the `text` column
+#   llm-pretrain-fineweb-edu-2BT     ~10 GB    ~2B tokens, text in the `text` column
+#   llm-pretrain-fineweb-edu-10BT    ~50 GB    the 10B-token sample, text in the `text` column
+#   llm-pretrain-fineweb-edu-100BT   ~286 GB   the 100B-token sample (parquet on the hub), `text` column
+#   the-stack-smol-xs                ~102 MB   code, 87 languages, in the `content` column
+  tokenize_pairs:
+    - dataset:                 llm-pretrain-fineweb-edu-100BT
+      tokenizer:               bpe
+    - dataset:                 llm-pretrain-fineweb-edu-10BT
+      tokenizer:               bpe
+    - dataset:                 llm-pretrain-fineweb-edu-2BT
+      tokenizer:               bpe
+    - dataset:                 llm-pretrain-wikitext103
+      tokenizer:               bpe
+    - dataset:                 llm-ultrachat
+      tokenizer:               bpe-instruct
+    - dataset:                 the-stack-smol-xs
+      tokenizer:               bpe-sft-coder
+
+# THE VOCABULARY. `bpe` is checkpoints/bpe/bpe.json, what stage 3 builds. When that file is not
+# there, the stage falls back to the tokenizer fetched by stage 1 from
+# roisincrtai/tokenizer-bpe-fineweb-edu-2BT rather than building one: a token stream is tied to
+# the vocabulary that produced it, so a stage that quietly trained its own BPE would write
+# streams no other stage could read.
+#
+# Any directory under checkpoints/ may be named here instead -- bpe-sft-coder,
+# bpe-sft-the-stack-smol-xs -- and the name is used as given, never prefixed.
+
+# packing. CORPUS_TEXT_COLUMN IS THE FALLBACK, NOT THE RULE. A corpus named in
+# default_config.BENCHMARK_CORPORA is read with ITS OWN column -- the-stack-smol-xs with
+# `content` -- and everything else with the value below. tokenize_data.run.text_column_for is
+# the one place that resolves it, and it prints the substitution when it makes one.
+#
+# WHY IT CANNOT SIMPLY BE ONE VALUE ANY MORE. This stage applies one column to every entry in
+# PRETRAIN_DIR above, and reading the Stack's JSONL as `text` finds no such field, hands the
+# file to the raw-text branch, and tokenises the literal characters of the JSON container.
+# Nothing errors; the stream is just wrong.
+  mira_config:                 mira-s
+  mira_cuda_bin:               mira_dspv2
+  libbpe:                      build/tokenizer/cpp/libbpe.so # the C++ tokenizer; commented out, the Python one
+  corpus_max_words:            344
+  corpus_text_column:          text
+
+# optional extra tokenize_data.run arguments
+  tokenize_flags:
+  extra_set:

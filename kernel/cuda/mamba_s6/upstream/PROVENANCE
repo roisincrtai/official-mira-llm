@@ -1,0 +1,39 @@
+VENDORED THIRD-PARTY SOURCE -- COPIED, NOT WRITTEN HERE.
+
+Project     mamba  --  https://github.com/state-spaces/mamba
+Authors     Tri Dao <tri@tridao.me>, Albert Gu <agu@andrew.cmu.edu>  (see AUTHORS)
+Licence     Apache License 2.0, "Copyright 2023 Tri Dao, Albert Gu".  The project's
+            LICENSE and AUTHORS files sit beside this one, byte-for-byte as they
+            ship upstream.  Every vendored source keeps its
+            "# Copyright (c) 2023, Tri Dao, Albert Gu." header untouched.
+Obtained    from the archive mamba-main.zip supplied by the user on 2026-08-16.
+            sha256(mamba-main.zip) =
+              9ae06061ff50f6f6e2a442570837d911acdf49141482cf3bddb2011669944197
+Version     mamba_ssm.__version__ = "2.3.2.post1" (from mamba_ssm/__init__.py in the
+            same archive).  A GitHub "-main.zip" snapshot carries no commit hash.
+
+FILES.  The whole of the archive's csrc/selective_scan/ directory, copied
+recursively and unmodified:
+
+  selective_scan/reverse_scan.cuh          selective_scan/selective_scan.cpp
+  selective_scan/selective_scan.h          selective_scan/selective_scan_common.h
+  selective_scan/static_switch.h           selective_scan/uninitialized_copy.cuh
+  selective_scan/selective_scan_fwd_{fp32,fp16,bf16}.cu
+  selective_scan/selective_scan_fwd_kernel.cuh
+  selective_scan/selective_scan_bwd_{fp32,fp16,bf16}_{real,complex}.cu
+  selective_scan/selective_scan_bwd_kernel.cuh
+
+THIS IS MAMBA-1's S6 SELECTIVE SCAN, the kernel behind
+mamba_ssm.ops.selective_scan_interface.selective_scan_fn and the one the existing
+kernel/cuda/mamba_s6/mamba_s6.cu reimplements.  Mamba-2's SSD and Mamba-3 are Triton
+and TileLang, not CUDA, and live in the PyTorch half at
+baselines/ssm/upstream/mamba_ssm/ops/.
+
+NOT ONE BYTE WAS CHANGED.  Verify against the archive with `diff -r`.
+
+HOW IT IS BUILT HERE.  Upstream builds these into the `selective_scan_cuda` Python
+extension through its own setup.py.  kernel/cuda/mamba_s6/upstream.py builds the
+same sources with torch.utils.cpp_extension.load and the same flags setup.py passes,
+so no pip install and no touching of the environment's torch is required -- see that
+file's header, and see requirements.txt for why `pip install mamba-ssm` is not an
+option in this repository.
