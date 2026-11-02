@@ -561,7 +561,6 @@ SPEC = [
 
     ("PRETRAIN_FLAGS",         "pretrain", "free",  ""),
     ("PRETRAIN_STEPS",         "pretrain", "opt",   "--pretrain_steps"),
-    ("PRETRAIN_EPOCHS",        "pretrain", "opt",   "--pretrain_epochs"),
     ("PEAK_LR",                "pretrain", "opt",   "--peak_lr"),
 
     ("SFT_FLAGS",              "sft",      "free",  ""),

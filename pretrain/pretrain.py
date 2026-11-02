@@ -26,7 +26,7 @@ STAGE = "pretrain"
 
 
 def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0,
-                progress_stage=STAGE, epochs=0):
+                progress_stage=STAGE):
     """Pre-tokenised pretraining documents (cached under cache/tokens/bpe_<256+merges>_<fp>/), reported
     as a table: the file count and the total token count the scan must announce.
 
@@ -52,8 +52,6 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0,
             "               ./run_scripts/run_download_data.sh\n"
             "           or set PRETRAIN_DIR in config/pretrain/config_user.yaml (--pretrain_dir).")
     missing = [d for d in roots if not os.path.isdir(d)]
-    if missing and epochs == 1:
-        raise ValueError("One-epoch corpus directories are missing: " + ", ".join(missing))
     if missing and len(missing) == len(roots):
         raise SystemExit(
             f"[pretrain] corpus director{'y does' if len(missing) == 1 else 'ies do'} not "
@@ -76,7 +74,7 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0,
         # trained on. The epoch figure is derived rather than asserted: it is what the step
         # budget actually buys over THIS corpus, which is how a mismatch between the two gets
         # noticed at the start of a run rather than at the end.
-        seen = config.PRETRAIN["steps"] * ctx_batch * ctx_len if ctx_batch and epochs != 1 else 0
+        seen = config.PRETRAIN["steps"] * ctx_batch * ctx_len if ctx_batch else 0
         # EVERY CORPUS NAMED, with its own stream and its own share of the mixture. A single
         # "dataset: x" line would hide the fact that two more were read, and the share is the
         # number that decides what the model actually sees: sampling is proportional to
@@ -87,7 +85,7 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0,
         parts = getattr(corpus, "streams", [corpus])
         names = getattr(corpus, "names", None) or [helpers.corpus_name(roots[0])]
         rows = [("corpora", f"{len(parts)} standalone stream"
-                            f"{'' if len(parts) == 1 else 's'}")]
+                            f"{'' if len(parts) == 1 else 's, sampled by token count'}")]
         for name, s in zip(names, parts):
             share = 100.0 * s.n_tokens / max(n_tok, 1)
             rows += [(name,
@@ -108,8 +106,6 @@ def load_corpus(tok, corpus_dir, log=print, ctx_batch=0, ctx_len=0,
                      ("budget", f"{config.PRETRAIN['steps']:,} steps = "
                                 f"{helpers.human(seen)} tokens"),
                      ("epochs over this corpus", f"{seen / max(n_tok, 1):.2f}")]
-        if epochs == 1:
-            rows += [("training policy", "exactly one pass over within-stream next-token targets")]
         helpers.table("pretrain corpus scan", rows, out=log)
     return corpus, n_files, n_tok
 
@@ -119,28 +115,6 @@ def run(ctx, corpus):
     generation previews are prompted from the corpus itself."""
     from helpers import common
     args, log = ctx["args"], ctx["log"]
-    if args.micro_batch != 0:
-        raise ValueError("Micro-batching is disabled for pretraining")
-    args.disable_pretrain_micro_batch = True
-    epoch_metadata = None
-    epoch_model = None
-    if getattr(args, "pretrain_epochs", 0) == 1:
-        from .epoch import EpochCorpus
-        from model import parallel
-        _, world = parallel.data_env(args.distributed_parallelism)
-        epoch_model = ctx["new_model"]()
-        regions = max(world, len(getattr(epoch_model, "device_ids", []) or []), 1)
-        checkpoint = helpers.load_ckpt(ctx["ckdir"], STAGE) if args.resume else None
-        start = int(checkpoint["step"]) if checkpoint else 0
-        windows = config.windows(args.context_window) or config.context_windows(args.model_scheme)
-        corpus = EpochCorpus(corpus, windows, args.batch, regions=regions, start=start)
-        epoch_metadata = corpus.metadata
-        if checkpoint and checkpoint.get("extra") != epoch_metadata:
-            raise RuntimeError("Checkpoint does not match the one-epoch corpus and batching plan")
-        args.pretrain_steps = corpus.steps
-        log(f"pretrain: exactly one corpus pass, {corpus.steps:,} optimizer steps; "
-            "each within-stream next-token target is used once")
-
     log(f"=== PRETRAIN (LM on {len(corpus):,} documents) ===")
     preview = common.make_preview(ctx["tok"], ctx["device"], args.max_len, log,
                                   common.corpus_prompts(corpus, seed=args.seed,
@@ -149,8 +123,8 @@ def run(ctx, corpus):
     # this is the stage long enough for the memory horizon to move, and the one where a
     # degenerate module (selectivity collapsing, or the residual stream routing around it)
     # would otherwise go unnoticed until much later
-    model = lm.train(epoch_model if epoch_model is not None else ctx["new_model"](), ctx["enc"], corpus, ctx["ckdir"], args, log,
+    model = lm.train(ctx["new_model"](), ctx["enc"], corpus, ctx["ckdir"], args, log,
                      ctx["monitor"], stage=STAGE, steps=args.pretrain_steps,
-                     lr=args.peak_lr, preview=preview, checkpoint_extra=epoch_metadata)
+                     lr=args.peak_lr, preview=preview)
     preview(model, STAGE, "final")
     return model

@@ -250,8 +250,6 @@ def context_plan_for(args, steps, docs):
     run has not pinned a context of its own with --context_window. A stage that
     was told which window to use is not second-guessed."""
     import default_config as config
-    if hasattr(docs, "training_plan"):
-        return docs.training_plan
     one = [(0, steps, max(int(args.max_len), 2), int(args.batch),
             int(getattr(args, "micro_batch", 0) or 0))]
     if not (hasattr(docs, "batch") and hasattr(docs, "n_tokens")):
@@ -272,18 +270,16 @@ def context_plan_for(args, steps, docs):
     # The batch in force belongs to the LONGEST window, which is what it was sized against.
     return config.context_plan(wins, steps, int(args.batch),
                                config.SCHEME_MICRO_TOKENS.get(scheme, 0)
-                               if not getattr(args, "micro_batch", 0)
-                               and not getattr(args, "disable_pretrain_micro_batch", False) else 0)
+                               if not getattr(args, "micro_batch", 0) else 0)
 
 
 def context_schedule(args, steps, docs, log, stage):
     """`context_plan_for`, announced."""
     plan = context_plan_for(args, steps, docs)
     if len(plan) > 1:
-        segment_note = "" if hasattr(docs, "training_plan") else f"{steps // len(plan):,} steps each, "
         log(f"{stage}: context schedule "
             f"{' -> '.join(f'{w:,}' for _, _, w, _, _ in plan)} "
-            f"over {steps:,} steps, {segment_note}"
+            f"over {steps:,} steps, {steps // len(plan):,} steps each, "
             f"batch/GPU {plan[0][3]} -> {plan[-1][3]}")
     return plan
 
@@ -474,7 +470,7 @@ def train(model, enc, docs, ckdir, args, log, monitor=None, stage=STAGE, steps=N
     #     opt = MasterMuon(model, lr=lr)
     #     log(f"{stage}: optimiser {opt.describe()}")
     if str(optimizer).lower() == "adamw":
-        opt = MasterAdamW(model.parameters(), lr=lr,
+        opt = MasterAdamW(model, lr=lr,
                           mixed_precision=getattr(args, "mixed_precision", False))
     else:
         raise ValueError(f"unknown optimizer {optimizer!r}; expected 'adamw'")

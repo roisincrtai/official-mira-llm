@@ -424,6 +424,22 @@ class MasterAdamW:
             betas = (float(config.TRAIN["adam_beta1"]), float(config.TRAIN["adam_beta2"]))
         if eps is None:
             eps = float(config.TRAIN["adam_eps"])
+        self._no_decay_groups = set()
+        if isinstance(params, torch.nn.Module):
+            norm_ids = {id(p) for module in params.modules()
+                        if "norm" in type(module).__name__.lower()
+                        for p in module.parameters(recurse=False)}
+            groups, previous = [], None
+            for name, p in params.named_parameters():
+                excluded = (id(p) in norm_ids
+                            or "bias" in name.rsplit(".", 1)[-1].split("_"))
+                if excluded != previous:
+                    groups.append({"params": [], "weight_decay": 0.0 if excluded else weight_decay})
+                    if excluded:
+                        self._no_decay_groups.add(len(groups) - 1)
+                    previous = excluded
+                groups[-1]["params"].append(p)
+            params = groups
         params = list(params)
         groups = params if (params and isinstance(params[0], dict)) else [{"params": params, "lr": lr}]
         self._pairs = []                    # [(live, master)] in group order
@@ -512,6 +528,28 @@ class MasterAdamW:
         out["state"] = state
         return out
 
+    def _regroup_inner(self, inner, positions=None):
+        old = [(key, group) for group in inner["param_groups"] for key in group["params"]]
+        if positions is None:
+            positions = list(range(len(old)))
+        if len(positions) != len(self._pairs):
+            raise ValueError("Optimizer checkpoint has a different parameter count")
+        groups, state, offset = [], {}, 0
+        for index, live_group in enumerate(self.inner.param_groups):
+            count = len(live_group["params"])
+            source = positions[offset:offset + count]
+            first = next((i for i in source if i is not None), None)
+            group = dict(old[first][1] if first is not None else live_group)
+            group["params"] = list(range(offset, offset + count))
+            if index in self._no_decay_groups:
+                group["weight_decay"] = 0.0
+            for key, position in zip(group["params"], source):
+                if position is not None and old[position][0] in inner["state"]:
+                    state[key] = inner["state"][old[position][0]]
+            groups.append(group)
+            offset += count
+        return dict(inner, state=state, param_groups=groups)
+
     @torch.no_grad()
     def load_state_dict(self, sd):
         if isinstance(sd, dict) and "masters" in sd:
@@ -526,23 +564,9 @@ class MasterAdamW:
                 for index, shape in removed.items():
                     if tuple(sd["masters"][index].shape) != shape:
                         raise ValueError("MIRA input-bias optimizer removal has incompatible shapes")
-                inner = sd["inner"]
-                groups, state, offset = [], {}, 0
-                if len(inner["param_groups"]) != len(self.inner.param_groups):
-                    raise ValueError("MIRA input-bias optimizer removal has incompatible groups")
-                for old_group, live_group in zip(inner["param_groups"], self.inner.param_groups):
-                    old_ids = [old_id for i, old_id in enumerate(old_group["params"], offset)
-                               if i not in removed]
-                    offset += len(old_group["params"])
-                    if len(old_ids) != len(live_group["params"]):
-                        raise ValueError("MIRA input-bias optimizer removal has incompatible groups")
-                    group = dict(old_group, params=list(live_group["params"]))
-                    for old_id, new_id in zip(old_ids, group["params"]):
-                        if old_id in inner["state"]:
-                            state[new_id] = inner["state"][old_id]
-                    groups.append(group)
+                positions = [i for i in range(len(sd["masters"])) if i not in removed]
                 sd = dict(sd, masters=[m for i, m in enumerate(sd["masters"]) if i not in removed],
-                          inner=dict(inner, state=state, param_groups=groups))
+                          inner=self._regroup_inner(sd["inner"], positions))
             if len(sd["masters"]) != len(self._pairs):
                 additions = [i for i, (p, _) in enumerate(self._pairs)
                              if getattr(p, "_mira_input_bias", False)]
@@ -550,26 +574,14 @@ class MasterAdamW:
                     source = iter(sd["masters"])
                     masters = [m.clone() if i in additions else next(source)
                                for i, (_, m) in enumerate(self._pairs)]
-                    inner = sd["inner"]
-                    old_groups = inner["param_groups"]
-                    groups, state, offset = [], {}, 0
-                    for old_group, live_group in zip(old_groups, self.inner.param_groups):
-                        old_ids = iter(old_group["params"])
-                        group = dict(old_group, params=list(live_group["params"]))
-                        for new_id in group["params"]:
-                            if offset not in additions:
-                                old_id = next(old_ids)
-                                if old_id in inner["state"]:
-                                    state[new_id] = inner["state"][old_id]
-                            offset += 1
-                        if next(old_ids, None) is not None:
-                            raise ValueError("MIRA input-bias optimizer migration has incompatible groups")
-                        groups.append(group)
+                    old_positions = iter(range(len(sd["masters"])))
+                    positions = [None if i in additions else next(old_positions)
+                                 for i in range(len(self._pairs))]
                     sd = dict(sd, masters=masters,
-                              inner=dict(inner, state=state, param_groups=groups))
+                              inner=self._regroup_inner(sd["inner"], positions))
             from model.distributed import distributed_fsdp_channel
             sd = distributed_fsdp_channel.channel_local_optimizer_state(self._pairs, sd)
-            self.inner.load_state_dict(self._grown_inner(sd["inner"]))
+            self.inner.load_state_dict(self._grown_inner(self._regroup_inner(sd["inner"])))
             for (_, m), s in zip(self._pairs, sd["masters"]):
                 self._fit(m, s)
             for p, m in self._pairs:
@@ -580,7 +592,7 @@ class MasterAdamW:
             for p, m in self._pairs:
                 m.copy_(p.float())
             try:
-                self.inner.load_state_dict(sd)
+                self.inner.load_state_dict(self._regroup_inner(sd))
             except Exception:
                 pass                            # moments restart; weights are correct
         for group in self.inner.param_groups:

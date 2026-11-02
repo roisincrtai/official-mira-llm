@@ -45,15 +45,15 @@
 # 4. model -- what is built, read by EVERY stage
   mira_config:                 mira-m            # mira-xs | mira-s | mira-m | mira-l
   mira_cuda_bin:               mira_dspv2
-  context_window:              4096 # mira-m's own context window
+  context_window:              1024,2048,4096,8192,16384 # mira-m's own context window
   #                            mira-s 512,1024; mira-l 1024,2048,4096,8192,16384,32768
 
 # 5. optimisation -- shared by every trainer; per-stage rates are per stage
-  grad_checkpoint:             1
+  grad_checkpoint:             0
   mira_cuda_kernel:            build/kernel/cuda # exported; where the cubins are
   libbpe:                      build/tokenizer/cpp/libbpe.so # the C++ tokenizer; commented out, the Python one
   mixed_precision:             1                 # 0 passes --no-mixed_precision
-  batch:                       16                 # sequences per GPU, sized for about 36 GiB
+  batch:                       6                 # sequences per GPU, sized for about 36 GiB
   #                            mira-s 50; mira-l 1
   micro_batch:                 0
   loss_chunk:                  0
@@ -80,9 +80,7 @@
   common_flags:                                  # free text, prepended to every stage
 
 # stage 6 -- pretraining
-  pretrain_steps:                            # mira-m's own budget, SCHEME_STEPS
+  pretrain_steps:              8307              # mira-m's own budget, SCHEME_STEPS
   #                            mira-s 60000; mira-l 24920
   peak_lr:                     2e-05
   pretrain_flags:
-
-  pretrain_epochs:             1

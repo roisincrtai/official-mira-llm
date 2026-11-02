@@ -408,7 +408,6 @@ def parse_args(argv=None, stage=None):
     # per-stage budgets / learning rates
     ap.add_argument("--bpe_merges", type=int, default=config.BPE["num_merges"])
     ap.add_argument("--pretrain_steps", type=int, default=config.PRETRAIN["steps"])
-    ap.add_argument("--pretrain_epochs", type=int, choices=(1,), default=1)
     ap.add_argument("--peak_lr", type=float, default=config.PRETRAIN["lr"])
     ap.add_argument("--sft_steps", type=int, default=config.SFT["steps"])
     ap.add_argument("--sft_lr", type=float, default=config.SFT["lr"])
@@ -487,9 +486,6 @@ def parse_args(argv=None, stage=None):
                 ", the final learning rate of the schedule (e.g. --last_lr 1e-5)"
                 if old == "lr_min_factor" else ""))
     args = ap.parse_args(_EFFECTIVE_ARGV)
-    args.disable_pretrain_micro_batch = stage == "pretrain"
-    if args.disable_pretrain_micro_batch and args.micro_batch != 0:
-        ap.error("micro-batching is disabled for pretraining")
     import importlib
     importlib.import_module("model.mira_mixer").use_mira_cuda(args.mira_cuda_bin)
     # OLD YAML FILES ARE INPUT ALIASES, NOT OUTPUT NAMES. Canonicalise once before any path,
